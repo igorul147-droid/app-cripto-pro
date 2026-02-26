@@ -264,21 +264,42 @@ def coingecko_resolve_id(query: str) -> str:
 @st.cache_data(ttl=300)
 def fetch_coingecko_ohlc(coin_id: str, days: int) -> pd.DataFrame:
     """
-    CoinGecko OHLC REAL (candle de verdade).
-    Retorna: timestamp(UTC), open, high, low, close, volume(0)
+    CoinGecko OHLC: retorna OHLC + volume (volume vem do market_chart).
+    Output final: timestamp(UTC), open, high, low, close, volume
     """
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    j = request_json(url, {"vs_currency": "usd", "days": days})
+    # 1) OHLC
+    url_ohlc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    j_ohlc = request_json(url_ohlc, {"vs_currency": "usd", "days": days})
 
-    df = pd.DataFrame(j, columns=["timestamp", "open", "high", "low", "close"])
-    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+    # formato: [timestamp, open, high, low, close]
+    df_ohlc = pd.DataFrame(j_ohlc, columns=["timestamp", "open", "high", "low", "close"])
+    df_ohlc["timestamp"] = pd.to_datetime(pd.to_numeric(df_ohlc["timestamp"]), unit="ms", utc=True)
 
-    # CoinGecko OHLC não traz volume
-    df["volume"] = 0.0
+    # 2) Volume (market_chart)
+    url_mc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    j_mc = request_json(url_mc, {"vs_currency": "usd", "days": days})
 
-    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-    return normalize_ohlcv(df)
+    df_vol = pd.DataFrame(j_mc.get("total_volumes", []), columns=["timestamp", "volume"])
+    if not df_vol.empty:
+        df_vol["timestamp"] = pd.to_datetime(pd.to_numeric(df_vol["timestamp"]), unit="ms", utc=True)
+        df_vol["volume"] = pd.to_numeric(df_vol["volume"], errors="coerce").fillna(0.0)
 
+        # junta volume no candle mais próximo (tolerância 2h, porque ohlc pode ser 4h/1d)
+        df_ohlc = pd.merge_asof(
+            df_ohlc.sort_values("timestamp"),
+            df_vol.sort_values("timestamp"),
+            on="timestamp",
+            direction="nearest",
+            tolerance=pd.Timedelta("2H"),
+        )
+        df_ohlc["volume"] = df_ohlc["volume"].fillna(0.0)
+    else:
+        df_ohlc["volume"] = 0.0
+
+    # normaliza pro padrão do seu app
+    df_ohlc = df_ohlc[["timestamp", "open", "high", "low", "close", "volume"]]
+    return normalize_ohlcv(df_ohlc)
+    
     # 1) Bybit
     try:
         df = fetch_bybit_ohlcv(sym, timeframe, limit)
@@ -293,14 +314,16 @@ def fetch_coingecko_ohlc(coin_id: str, days: int) -> pd.DataFrame:
     except Exception as e:
         errors["Binance"] = str(e)[:260]
 
-   # 3) CoinGecko OHLC (fallback real)
+    # 3) CoinGecko OHLC (fallback)
     try:
+        # CoinGecko OHLC aceita days: 1, 7, 14, 30, 90, 180, 365, max
+        # Ajuste bom pro seu uso:
         if timeframe == "1h":
-            days_fetch = 7
+            days_fetch = 7   # CG OHLC em 7d costuma vir “mais granular” (e cobre sua janela 2d)
         elif timeframe == "4h":
-            days_fetch = 7
+            days_fetch = 14  # normalmente CG entrega candles mais próximos de 4h
         else:
-            days_fetch = 14
+            days_fetch = 30  # 1d fica estável e cobre janela 7d
 
         cg_id = coingecko_resolve_id(base)
         df = fetch_coingecko_ohlc(cg_id, days_fetch)
@@ -601,6 +624,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
