@@ -331,7 +331,7 @@ def build_dataset_hybrid(moeda: str, timeframe: str):
     except Exception as e:
         errors["CoinGecko"] = str(e)[:220]
 
-    raise RuntimeError("Falha geral de dados"), errors
+    raise RuntimeError(f"Falha geral de dados | Erros: {errors}")
 
 # ==============================
 # TABS
@@ -506,6 +506,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo: Bybit → Binance → CoinGecko (fallback). Janela automática: 1h=2d, 4h=4d, 1d=7d.")
+
 
 
 
