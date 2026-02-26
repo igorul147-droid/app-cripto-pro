@@ -311,8 +311,16 @@ def build_dataset_hybrid(moeda: str, timeframe: str):
         errors["Binance"] = str(e)[:260]
 
     # 3) CoinGecko (fallback com resample)
-    try:
-        days_fetch = 5 if timeframe == "1h" else 12 if timeframe == "4h" else 30
+   try:
+    # IMPORTANTÍSSIMO:
+    # Para 1h, se você pede muitos dias, o CoinGecko tende a devolver pontos 1/h,
+    # e os candles viram “tracinhos”. Então pegamos menos dias (maior granularidade).
+    if timeframe == "1h":
+        days_fetch = 2   # mantém granularidade melhor e cobre sua janela de 2 dias
+    elif timeframe == "4h":
+        days_fetch = 7   # ok pra 4h (e cobre sua janela 4 dias)
+    else:
+        days_fetch = 30  # 1d
 
         # resolve pelo símbolo base (mais robusto do que manter map manual pra tudo)
         cg_id = coingecko_resolve_id(base)
@@ -614,6 +622,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
