@@ -7,17 +7,24 @@ import datetime
 import requests
 from plotly.subplots import make_subplots
 
-# Atualização automática
-st_autorefresh(interval=60*1000, key="refresh")
-
 st.set_page_config(layout="wide", page_title="App Cripto PRO+")
 st.title("🚀 Análise Cripto PRO+")
+
+# =============================
+# CONTROLES (mais estável no Cloud)
+# =============================
+auto_refresh = st.toggle("🔄 Atualização automática", value=False)
+refresh_seconds = st.select_slider("Intervalo (segundos)", options=[60, 120, 180, 300], value=120)
+
+if auto_refresh:
+    st_autorefresh(interval=refresh_seconds * 1000, key="refresh")
 
 # Seleção de moedas
 moedas = st.multiselect(
     "Escolha até 3 criptos:",
     ["BTC/USDT", "ETH/USDT", "ADA/USDT", "DOGE/USDT", "PEPE/USDT", "TURBO/USDT", "NEIRO/USDT"],
-    default=["BTC/USDT"]
+    default=["BTC/USDT"],
+    max_selections=3
 )
 
 timeframe = st.selectbox("Escolha o timeframe:", ["1d", "4h", "1h"])
@@ -32,46 +39,59 @@ indicadores = st.multiselect(
 meme_coins = ["DOGE/USDT", "PEPE/USDT", "TURBO/USDT", "NEIRO/USDT"]
 
 # =============================
-# FUNÇÃO DE DADOS (BINANCE + FALLBACK)
+# EXCHANGE (criado 1x e reutilizado)
 # =============================
+@st.cache_resource
+def get_exchange():
+    return ccxt.binance({"enableRateLimit": True})
+
+exchange = get_exchange()
+
+# =============================
+# FUNÇÃO DE DADOS (BINANCE + FALLBACK) com CACHE
+# =============================
+@st.cache_data(ttl=60)
 def fetch_ohlcv_safe(symbol, timeframe="1d"):
+    # 1) Binance (principal)
     try:
-        exchange = ccxt.binance()
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df, "Binance"
-
     except Exception:
-        try:
-            coin_id = symbol.split("/")[0].lower()
+        pass
 
-            days_map = {"1d": 90, "4h": 30, "1h": 7}
-            days = days_map.get(timeframe, 90)
+    # 2) CoinGecko (fallback)
+    try:
+        coin_id = symbol.split("/")[0].lower()
+        days_map = {"1d": 90, "4h": 30, "1h": 7}
+        days = days_map.get(timeframe, 90)
 
-            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-            params = {"vs_currency": "usd", "days": days}
-            r = requests.get(url, params=params)
-            r.raise_for_status()
-            data = r.json()
+        url = "https://api.coingecko.com/api/v3/coins/{}/market_chart".format(coin_id)
+        params = {"vs_currency": "usd", "days": days}
 
-            df = pd.DataFrame(data['prices'], columns=['timestamp','close'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df['open'] = df['close']
-            df['high'] = df['close']
-            df['low'] = df['close']
-            df['volume'] = 0
+        headers = {"User-Agent": "Mozilla/5.0 (StreamlitApp)"}
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        r.raise_for_status()
+        data = r.json()
 
-            return df, "CoinGecko"
+        df = pd.DataFrame(data['prices'], columns=['timestamp', 'close'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['open'] = df['close']
+        df['high'] = df['close']
+        df['low'] = df['close']
+        df['volume'] = 0
 
-        except Exception:
-            return None, None
+        return df, "CoinGecko"
+    except Exception:
+        return None, None
 
 # =============================
 # LOOP PRINCIPAL
 # =============================
 for moeda in moedas:
-    with st.expander(f"Detalhes de {moeda}", expanded=True):
+    # expanded=False para evitar bug/instabilidade com refresh + plotly no Cloud
+    with st.expander(f"Detalhes de {moeda}", expanded=False):
 
         if moeda in meme_coins:
             st.warning("🧪 Meme coin — alta volatilidade")
@@ -88,7 +108,7 @@ for moeda in moedas:
         df_mes = df_full[
             (df_full['timestamp'].dt.month == now.month) &
             (df_full['timestamp'].dt.year == now.year)
-        ].copy()  # evita warnings pandas
+        ].copy()
 
         if df_mes.empty:
             st.warning(f"Não há dados para {moeda} no mês atual.")
@@ -128,6 +148,8 @@ for moeda in moedas:
         # =============================
         # INDICADORES
         # =============================
+        ultimo_rsi = None
+
         if "SMA20" in indicadores:
             df_mes['SMA20'] = df_mes['close'].rolling(20).mean()
 
@@ -141,16 +163,17 @@ for moeda in moedas:
             df_mes['RSI'] = 100 - (100 / (1 + rs))
 
             ultimo_rsi = df_mes['RSI'].iloc[-1]
-            if ultimo_rsi > 70:
-                st.warning(f"⚠ RSI em Sobrecompra ({ultimo_rsi:.2f})")
-            elif ultimo_rsi < 30:
-                st.warning(f"⚠ RSI em Sobrevenda ({ultimo_rsi:.2f})")
+            if pd.notna(ultimo_rsi):
+                if ultimo_rsi > 70:
+                    st.warning(f"⚠ RSI em Sobrecompra ({ultimo_rsi:.2f})")
+                elif ultimo_rsi < 30:
+                    st.warning(f"⚠ RSI em Sobrevenda ({ultimo_rsi:.2f})")
 
         if "Bollinger Bands" in indicadores:
             df_mes['BB_middle'] = df_mes['close'].rolling(20).mean()
             df_mes['BB_std'] = df_mes['close'].rolling(20).std()
-            df_mes['BB_upper'] = df_mes['BB_middle'] + 2*df_mes['BB_std']
-            df_mes['BB_lower'] = df_mes['BB_middle'] - 2*df_mes['BB_std']
+            df_mes['BB_upper'] = df_mes['BB_middle'] + 2 * df_mes['BB_std']
+            df_mes['BB_lower'] = df_mes['BB_middle'] - 2 * df_mes['BB_std']
 
         if "MACD" in indicadores:
             ema12 = df_mes['close'].ewm(span=12, adjust=False).mean()
@@ -161,10 +184,9 @@ for moeda in moedas:
         # =============================
         # SINAIS AUTOMÁTICOS
         # =============================
-        if "RSI" in indicadores and "MACD" in indicadores:
+        if ("RSI" in indicadores) and ("MACD" in indicadores) and (ultimo_rsi is not None) and pd.notna(ultimo_rsi):
             if ultimo_rsi < 30 and df_mes['MACD'].iloc[-1] > df_mes['MACD_signal'].iloc[-1]:
                 st.success("🟢 Sinal de COMPRA confirmado")
-
             elif ultimo_rsi > 70 and df_mes['MACD'].iloc[-1] < df_mes['MACD_signal'].iloc[-1]:
                 st.error("🔴 Sinal de VENDA confirmado")
 
@@ -242,12 +264,13 @@ for moeda in moedas:
 
         if moeda in meme_coins:
             st.dataframe(
-                df_mes[['timestamp','open','high','low','close','volume']]
+                df_mes[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
                 .round(6).tail(10)
             )
         else:
             st.dataframe(df_mes.tail(10))
 
-st.info("🔄 Atualização automática a cada 30 segundos.")
-
-
+if auto_refresh:
+    st.info(f"🔄 Atualização automática a cada {refresh_seconds} segundos.")
+else:
+    st.info("🔄 Atualização automática desativada (ligue no toggle acima).")
