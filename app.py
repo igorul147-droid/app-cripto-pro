@@ -10,7 +10,7 @@ import requests
 from plotly.subplots import make_subplots
 
 # Atualização automática
-st_autorefresh(interval=30*1000, key="refresh")
+st_autorefresh(interval=60*1000, key="refresh")
 
 st.set_page_config(layout="wide", page_title="App Cripto PRO+")
 st.title("🚀 Análise Cripto PRO+")
@@ -251,3 +251,4 @@ for moeda in moedas:
             st.dataframe(df_mes.tail(10))
 
 st.info("🔄 Atualização automática a cada 30 segundos.")
+
