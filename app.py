@@ -69,7 +69,6 @@ def apply_time_window(df: pd.DataFrame, window_days: int) -> pd.DataFrame:
     return df[df["timestamp"] >= start].copy()
 
 def ensure_timestamp_utc(series: pd.Series) -> pd.Series:
-    # garante datetime UTC tz-aware
     s = series
     if not pd.api.types.is_datetime64_any_dtype(s):
         s = pd.to_datetime(s, utc=True, errors="coerce")
@@ -81,7 +80,7 @@ def ensure_timestamp_utc(series: pd.Series) -> pd.Series:
     return s
 
 def to_local_naive(df: pd.DataFrame) -> pd.DataFrame:
-    # converte pra horário do Brasil e deixa "naive" pro Plotly renderizar bonito
+    # converte pra horário do Brasil e deixa "naive" pro Plotly renderizar
     d = df.copy()
     d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
     return d
@@ -98,26 +97,6 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         d["volume"] = 0.0
     d["volume"] = d["volume"].fillna(0.0)
     return d
-
-def resample_to_ohlcv(df_close_vol: pd.DataFrame, tf: str) -> pd.DataFrame:
-    """
-    df_close_vol: colunas timestamp(UTC), close, volume
-    resample em OHLCV real (resolve candles ruins do CoinGecko)
-    """
-    d = df_close_vol.copy()
-    d["timestamp"] = ensure_timestamp_utc(d["timestamp"])
-    d = d.sort_values("timestamp").dropna(subset=["close"]).reset_index(drop=True)
-    d = d.set_index("timestamp")
-
-    freq = timeframe_freq(tf)
-
-    ohlc = d["close"].resample(freq).ohlc()
-    vol = d["volume"].resample(freq).sum().rename("volume")
-
-    out = pd.concat([ohlc, vol], axis=1).dropna(subset=["open", "high", "low", "close"])
-    out = out.reset_index()
-    out.columns = ["timestamp", "open", "high", "low", "close", "volume"]
-    return normalize_ohlcv(out)
 
 def add_range_buttons(fig):
     fig.update_xaxes(
@@ -217,125 +196,6 @@ def fetch_binance_usdt_spot_pairs() -> list[str]:
     ]
 
 # ==============================
-# DATA SOURCES
-# ==============================
-@st.cache_data(ttl=180)
-def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-    interval_map = {"1h": "60", "4h": "240", "1d": "D"}
-    url = "https://api.bybit.com/v5/market/kline"
-    params = {
-        "category": "spot",
-        "symbol": symbol,
-        "interval": interval_map[timeframe],
-        "limit": str(limit),
-    }
-    j = request_json(url, params)
-    if str(j.get("retCode")) != "0":
-        raise RuntimeError(f"Bybit retCode={j.get('retCode')} msg={j.get('retMsg')}")
-    rows = j["result"]["list"]
-    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
-    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
-    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-    return normalize_ohlcv(df)
-
-@st.cache_data(ttl=180)
-def fetch_binance_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-    interval_map = {"1h": "1h", "4h": "4h", "1d": "1d"}
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval_map[timeframe], "limit": str(limit)}
-    j = request_json(url, params)
-    df = pd.DataFrame(j, columns=[
-        "timestamp", "open", "high", "low", "close", "volume",
-        "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore"
-    ])
-    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
-    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-    return normalize_ohlcv(df)
-
-@st.cache_data(ttl=600)
-def coingecko_resolve_id(query: str) -> str:
-    url = "https://api.coingecko.com/api/v3/search"
-    j = request_json(url, {"query": query}, attempts=2, base_sleep=0.6)
-    coins = j.get("coins", [])
-    if not coins:
-        raise RuntimeError("CoinGecko search vazio")
-    return coins[0]["id"]
-
-@st.cache_data(ttl=300)
-def fetch_coingecko_ohlc(coin_id: str, days: int) -> pd.DataFrame:
-    """
-    CoinGecko OHLC: retorna OHLC + volume (volume vem do market_chart).
-    Output final: timestamp(UTC), open, high, low, close, volume
-    """
-    # 1) OHLC
-    url_ohlc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    j_ohlc = request_json(url_ohlc, {"vs_currency": "usd", "days": days})
-
-    # formato: [timestamp, open, high, low, close]
-    df_ohlc = pd.DataFrame(j_ohlc, columns=["timestamp", "open", "high", "low", "close"])
-    df_ohlc["timestamp"] = pd.to_datetime(pd.to_numeric(df_ohlc["timestamp"]), unit="ms", utc=True)
-
-    # 2) Volume (market_chart)
-    url_mc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-    j_mc = request_json(url_mc, {"vs_currency": "usd", "days": days})
-
-    df_vol = pd.DataFrame(j_mc.get("total_volumes", []), columns=["timestamp", "volume"])
-    if not df_vol.empty:
-        df_vol["timestamp"] = pd.to_datetime(pd.to_numeric(df_vol["timestamp"]), unit="ms", utc=True)
-        df_vol["volume"] = pd.to_numeric(df_vol["volume"], errors="coerce").fillna(0.0)
-
-        # junta volume no candle mais próximo (tolerância 2h, porque ohlc pode ser 4h/1d)
-        df_ohlc = pd.merge_asof(
-            df_ohlc.sort_values("timestamp"),
-            df_vol.sort_values("timestamp"),
-            on="timestamp",
-            direction="nearest",
-            tolerance=pd.Timedelta("2H"),
-        )
-        df_ohlc["volume"] = df_ohlc["volume"].fillna(0.0)
-    else:
-        df_ohlc["volume"] = 0.0
-
-    # normaliza pro padrão do seu app
-    df_ohlc = df_ohlc[["timestamp", "open", "high", "low", "close", "volume"]]
-    return normalize_ohlcv(df_ohlc)
-    
-    # 1) Bybit
-    try:
-        df = fetch_bybit_ohlcv(sym, timeframe, limit)
-        return df, "Bybit (spot)", window_days, errors
-    except Exception as e:
-        errors["Bybit"] = str(e)[:260]
-
-    # 2) Binance
-    try:
-        df = fetch_binance_ohlcv(sym, timeframe, limit)
-        return df, "Binance (spot)", window_days, errors
-    except Exception as e:
-        errors["Binance"] = str(e)[:260]
-
-    # 3) CoinGecko OHLC (fallback)
-    try:
-        # CoinGecko OHLC aceita days: 1, 7, 14, 30, 90, 180, 365, max
-        # Ajuste bom pro seu uso:
-        if timeframe == "1h":
-            days_fetch = 7   # CG OHLC em 7d costuma vir “mais granular” (e cobre sua janela 2d)
-        elif timeframe == "4h":
-            days_fetch = 14  # normalmente CG entrega candles mais próximos de 4h
-        else:
-            days_fetch = 30  # 1d fica estável e cobre janela 7d
-
-        cg_id = coingecko_resolve_id(base)
-        df = fetch_coingecko_ohlc(cg_id, days_fetch)
-
-        return df, "CoinGecko OHLC (fallback)", window_days, errors
-
-    except Exception as e:
-        errors["CoinGecko"] = str(e)[:260]
-
-    raise RuntimeError("Falha geral de dados", errors)
-
-# ==============================
 # SIDEBAR
 # ==============================
 with st.sidebar:
@@ -350,18 +210,18 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    timeframe = st.selectbox("Timeframe:", ["1h", "4h", "1d"], index=0)
+    timeframe = st.selectbox("Prazo:", ["1h", "4h", "1d"], index=0)
 
     st.divider()
     st.subheader("📌 Indicadores (premium)")
     show_ma = st.toggle("MA 7/25/99 (igual Binance)", value=True)
-    show_bb = st.toggle("Bollinger Bands (20, 2)", value=False)
+    show_bb = st.toggle("Bandas de Bollinger (20, 2)", value=False)
     show_rsi = st.toggle("RSI (14)", value=True)
     show_macd = st.toggle("MACD (12/26/9)", value=True)
 
     st.divider()
     st.subheader("📊 Volume")
-    clean_volume = st.toggle("Volume clean (mais discreto)", value=True)
+    clean_volume = st.toggle("Volume limpo (mais discreto)", value=True)
     volume_colored = st.toggle("Volume verde/vermelho", value=True)
     show_vol_ma = st.toggle("Média do volume (linha)", value=True)
     vol_ma_period = st.slider("Período média do volume", 5, 50, 20, 1)
@@ -415,6 +275,141 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 # ==============================
+# DATA SOURCES
+# ==============================
+@st.cache_data(ttl=180)
+def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    interval_map = {"1h": "60", "4h": "240", "1d": "D"}
+    url = "https://api.bybit.com/v5/market/kline"
+    params = {
+        "category": "spot",
+        "symbol": symbol,
+        "interval": interval_map[timeframe],
+        "limit": str(limit),
+    }
+    j = request_json(url, params)
+    if str(j.get("retCode")) != "0":
+        raise RuntimeError(f"Bybit retCode={j.get('retCode')} msg={j.get('retMsg')}")
+    rows = j["result"]["list"]
+    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
+    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+    return normalize_ohlcv(df)
+
+@st.cache_data(ttl=180)
+def fetch_binance_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    interval_map = {"1h": "1h", "4h": "4h", "1d": "1d"}
+    endpoints = [
+        "https://api.binance.com/api/v3/klines",
+        "https://api1.binance.com/api/v3/klines",
+        "https://api2.binance.com/api/v3/klines",
+        "https://api3.binance.com/api/v3/klines",
+        "https://data-api.binance.vision/api/v3/klines",  # MUITO bom no Streamlit Cloud
+    ]
+
+    params = {"symbol": symbol, "interval": interval_map[timeframe], "limit": str(limit)}
+    last_err = None
+
+    for url in endpoints:
+        try:
+            j = request_json(url, params)
+            df = pd.DataFrame(j, columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore"
+            ])
+            df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+            return normalize_ohlcv(df)
+        except Exception as e:
+            last_err = e
+
+    raise last_err if last_err else RuntimeError("Falha Binance klines")
+
+@st.cache_data(ttl=600)
+def coingecko_resolve_id(query: str) -> str:
+    url = "https://api.coingecko.com/api/v3/search"
+    j = request_json(url, {"query": query}, attempts=2, base_sleep=0.6)
+    coins = j.get("coins", [])
+    if not coins:
+        raise RuntimeError("CoinGecko search vazio")
+    return coins[0]["id"]
+
+@st.cache_data(ttl=300)
+def fetch_coingecko_ohlc(coin_id: str, days: int) -> pd.DataFrame:
+    """
+    CoinGecko OHLC: retorna OHLC + volume (volume vem do market_chart).
+    Output final: timestamp(UTC), open, high, low, close, volume
+    """
+    url_ohlc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    j_ohlc = request_json(url_ohlc, {"vs_currency": "usd", "days": days})
+
+    df_ohlc = pd.DataFrame(j_ohlc, columns=["timestamp", "open", "high", "low", "close"])
+    df_ohlc["timestamp"] = pd.to_datetime(pd.to_numeric(df_ohlc["timestamp"]), unit="ms", utc=True)
+
+    url_mc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    j_mc = request_json(url_mc, {"vs_currency": "usd", "days": days})
+
+    df_vol = pd.DataFrame(j_mc.get("total_volumes", []), columns=["timestamp", "volume"])
+    if not df_vol.empty:
+        df_vol["timestamp"] = pd.to_datetime(pd.to_numeric(df_vol["timestamp"]), unit="ms", utc=True)
+        df_vol["volume"] = pd.to_numeric(df_vol["volume"], errors="coerce").fillna(0.0)
+
+        df_ohlc = pd.merge_asof(
+            df_ohlc.sort_values("timestamp"),
+            df_vol.sort_values("timestamp"),
+            on="timestamp",
+            direction="nearest",
+            tolerance=pd.Timedelta("2H"),
+        )
+        df_ohlc["volume"] = df_ohlc["volume"].fillna(0.0)
+    else:
+        df_ohlc["volume"] = 0.0
+
+    df_ohlc = df_ohlc[["timestamp", "open", "high", "low", "close", "volume"]]
+    return normalize_ohlcv(df_ohlc)
+
+def build_dataset_hybrid(moeda: str, timeframe: str):
+    sym = symbol_compact(moeda)   # BTCUSDT
+    base = moeda.split("/")[0]    # BTC
+    limit = limit_for_timeframe(timeframe)
+    window_days = window_days_for_timeframe(timeframe)
+
+    errors = {}
+
+    # 1) Bybit
+    try:
+        df = fetch_bybit_ohlcv(sym, timeframe, limit)
+        return df, "Bybit (spot)", window_days, errors
+    except Exception as e:
+        errors["Bybit"] = str(e)[:260]
+
+    # 2) Binance
+    try:
+        df = fetch_binance_ohlcv(sym, timeframe, limit)
+        return df, "Binance (spot)", window_days, errors
+    except Exception as e:
+        errors["Binance"] = str(e)[:260]
+
+    # 3) CoinGecko OHLC (fallback)
+    try:
+        # CoinGecko OHLC aceita: 1, 7, 14, 30, 90, 180, 365, max
+        if timeframe == "1h":
+            days_fetch = 7
+        elif timeframe == "4h":
+            days_fetch = 14
+        else:
+            days_fetch = 30
+
+        cg_id = coingecko_resolve_id(base)
+        df = fetch_coingecko_ohlc(cg_id, days_fetch)
+        return df, "CoinGecko OHLC (fallback)", window_days, errors
+
+    except Exception as e:
+        errors["CoinGecko"] = str(e)[:260]
+
+    raise RuntimeError("Falha geral de dados", errors)
+
+# ==============================
 # COINS (FULL BINANCE USDT SPOT)
 # ==============================
 ALL_USDT = fetch_binance_usdt_spot_pairs()
@@ -427,7 +422,9 @@ if "binance_pairs_error" in st.session_state:
     if st.sidebar.toggle("🧪 Debug lista Binance", value=False):
         st.sidebar.code(st.session_state["binance_pairs_error"])
 
-meme_coins = {m for m in ALL_USDT if m.split("/")[0] in {"DOGE", "PEPE", "TURBO", "SHIB"}}
+# meme coins "simples" (você pode expandir)
+meme_bases = {"DOGE", "PEPE", "TURBO", "SHIB", "FLOKI", "BONK", "WIF"}
+meme_coins = {m for m in ALL_USDT if m.split("/")[0] in meme_bases}
 
 moedas = st.multiselect(
     "Escolha até 3 criptos:",
@@ -465,13 +462,17 @@ for moeda in moedas:
                     st.code(f"{k}: {v}", language="text")
             continue
 
+        # janela fixa (2d/4d/7d)
         df_view_utc = apply_time_window(df_full_utc, window_days)
         if df_view_utc.empty or len(df_view_utc) < 10:
             st.warning("Poucos dados para renderizar. Tente outro timeframe.")
             st.caption(f"Fonte: {source}")
             continue
 
+        # indicadores (em UTC)
         df_view_utc = add_indicators(df_view_utc)
+
+        # converte pra Brasil só pra plot/tooltip
         df_view = to_local_naive(df_view_utc)
 
         ultimo = float(df_view_utc["close"].iloc[-1])
@@ -480,7 +481,7 @@ for moeda in moedas:
 
         st.caption(f"📡 Fonte: **{source}**")
         st.markdown(
-            f"<span class='badge'>Timeframe: <b>{timeframe}</b></span>"
+            f"<span class='badge'>Prazo: <b>{timeframe}</b></span>"
             f"<span class='badge'>Janela: <b>{window_days} dias</b></span>"
             f"<span class='badge'>TZ: <b>{TZ_LOCAL}</b></span>",
             unsafe_allow_html=True
@@ -526,16 +527,19 @@ for moeda in moedas:
             if show_price_line:
                 fig.add_hline(y=ultimo, line_dash="dot", opacity=0.55, row=1, col=1)
 
+            # MAs
             if show_ma and "MA7" in df_view.columns:
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA7"], mode="lines", opacity=0.9, name="MA7"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA25"], mode="lines", opacity=0.9, name="MA25"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA99"], mode="lines", opacity=0.9, name="MA99"), row=1, col=1)
 
+            # BB
             if show_bb and "BB_UP" in df_view.columns:
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_UP"], mode="lines", opacity=0.55, name="BB Upper"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_MID"], mode="lines", opacity=0.55, name="BB Mid"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_LOW"], mode="lines", opacity=0.55, name="BB Lower"), row=1, col=1)
 
+            # Volume
             if volume_colored:
                 vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_view["open"], df_view["close"])]
             else:
@@ -624,6 +628,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
