@@ -293,29 +293,30 @@ def fetch_coingecko_ohlc(coin_id: str, days: int) -> pd.DataFrame:
     except Exception as e:
         errors["Binance"] = str(e)[:260]
 
-   # 3) CoinGecko (fallback com resample)
-    try:
-        # IMPORTANTÍSSIMO:
-        # Para 1h, se você pede muitos dias, o CoinGecko tende a devolver pontos 1/h,
-        # e os candles viram “tracinhos”. Então pegamos menos dias (maior granularidade).
-        if timeframe == "1h":
-            days_fetch = 2
-        elif timeframe == "4h":
-            days_fetch = 7
-        else:
-            days_fetch = 30
+   # 3) CoinGecko (fallback OHLC real)
+try:
+    # CoinGecko OHLC só aceita days: 1, 7, 14, 30, 90, 180, 365, max
+    # A gente escolhe o menor que cobre sua janela (2d/4d/7d)
+    if timeframe == "1h":
+        days_fetch = 7   # cobre 2 dias com folga
+    elif timeframe == "4h":
+        days_fetch = 7   # cobre 4 dias
+    else:
+        days_fetch = 14  # 1d com janela 7d
 
-        # resolve pelo símbolo base
+    cg_id = coin_map.get(moeda)
+    if not cg_id:
         cg_id = coingecko_resolve_id(base)
-        raw = fetch_coingecko_prices_and_volumes(cg_id, days_fetch)
 
-        df = resample_to_ohlcv(raw, timeframe)
-        return df, "CoinGecko (fallback)", window_days, errors
+    try:
+        df = fetch_coingecko_ohlc(cg_id, days_fetch)
+    except Exception:
+        cg_id = coingecko_resolve_id(base)
+        df = fetch_coingecko_ohlc(cg_id, days_fetch)
 
-    except Exception as e:
-        errors["CoinGecko"] = str(e)[:260]
-
-    raise RuntimeError("Falha geral de dados", errors)
+    return df, "CoinGecko OHLC (fallback)", window_days, errors
+except Exception as e:
+    errors["CoinGecko"] = str(e)[:260]
 
 # ==============================
 # SIDEBAR
@@ -606,6 +607,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
