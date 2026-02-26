@@ -310,24 +310,25 @@ def build_dataset_hybrid(moeda: str, timeframe: str):
     except Exception as e:
         errors["Binance"] = str(e)[:260]
 
-    # 3) CoinGecko (fallback com resample)
-   try:
-    # IMPORTANTÍSSIMO:
-    # Para 1h, se você pede muitos dias, o CoinGecko tende a devolver pontos 1/h,
-    # e os candles viram “tracinhos”. Então pegamos menos dias (maior granularidade).
-    if timeframe == "1h":
-        days_fetch = 2   # mantém granularidade melhor e cobre sua janela de 2 dias
-    elif timeframe == "4h":
-        days_fetch = 7   # ok pra 4h (e cobre sua janela 4 dias)
-    else:
-        days_fetch = 30  # 1d
+   # 3) CoinGecko (fallback com resample)
+    try:
+        # IMPORTANTÍSSIMO:
+        # Para 1h, se você pede muitos dias, o CoinGecko tende a devolver pontos 1/h,
+        # e os candles viram “tracinhos”. Então pegamos menos dias (maior granularidade).
+        if timeframe == "1h":
+            days_fetch = 2
+        elif timeframe == "4h":
+            days_fetch = 7
+        else:
+            days_fetch = 30
 
-        # resolve pelo símbolo base (mais robusto do que manter map manual pra tudo)
+        # resolve pelo símbolo base
         cg_id = coingecko_resolve_id(base)
         raw = fetch_coingecko_prices_and_volumes(cg_id, days_fetch)
 
         df = resample_to_ohlcv(raw, timeframe)
         return df, "CoinGecko (fallback)", window_days, errors
+
     except Exception as e:
         errors["CoinGecko"] = str(e)[:260]
 
@@ -622,6 +623,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
