@@ -262,39 +262,22 @@ def coingecko_resolve_id(query: str) -> str:
     return coins[0]["id"]
 
 @st.cache_data(ttl=300)
-def fetch_coingecko_prices_and_volumes(coin_id: str, days: int) -> pd.DataFrame:
+def fetch_coingecko_ohlc(coin_id: str, days: int) -> pd.DataFrame:
     """
-    Puxa close + volume no CoinGecko e devolve timestamp(UTC), close, volume.
-    Depois resampleamos em OHLCV real pro timeframe desejado.
+    CoinGecko OHLC REAL (candle de verdade).
+    Retorna: timestamp(UTC), open, high, low, close, volume(0)
     """
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
     j = request_json(url, {"vs_currency": "usd", "days": days})
 
-    prices = pd.DataFrame(j["prices"], columns=["timestamp", "close"])
-    prices["timestamp"] = pd.to_datetime(pd.to_numeric(prices["timestamp"]), unit="ms", utc=True)
+    df = pd.DataFrame(j, columns=["timestamp", "open", "high", "low", "close"])
+    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
 
-    volumes = pd.DataFrame(j["total_volumes"], columns=["timestamp", "volume"])
-    volumes["timestamp"] = pd.to_datetime(pd.to_numeric(volumes["timestamp"]), unit="ms", utc=True)
+    # CoinGecko OHLC não traz volume
+    df["volume"] = 0.0
 
-    df = pd.merge_asof(
-        prices.sort_values("timestamp"),
-        volumes.sort_values("timestamp"),
-        on="timestamp",
-        direction="nearest",
-        tolerance=pd.Timedelta("30min")
-    )
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df = df.dropna(subset=["close"]).reset_index(drop=True)
-    return df
-
-def build_dataset_hybrid(moeda: str, timeframe: str):
-    sym = symbol_compact(moeda)   # BTCUSDT
-    base = moeda.split("/")[0]    # BTC
-    limit = limit_for_timeframe(timeframe)
-    window_days = window_days_for_timeframe(timeframe)
-
-    errors = {}
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+    return normalize_ohlcv(df)
 
     # 1) Bybit
     try:
@@ -623,6 +606,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
