@@ -1,0 +1,8 @@
+requirements.txt
+
+streamlit
+pandas
+ccxt
+plotly
+requests
+streamlit-autorefresh
