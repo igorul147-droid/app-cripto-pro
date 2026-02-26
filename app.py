@@ -1,5 +1,3 @@
-app.py
-
 import streamlit as st
 import pandas as pd
 import ccxt
@@ -251,4 +249,5 @@ for moeda in moedas:
             st.dataframe(df_mes.tail(10))
 
 st.info("🔄 Atualização automática a cada 30 segundos.")
+
 
