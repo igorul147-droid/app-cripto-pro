@@ -10,7 +10,7 @@ import datetime
 # ==============================
 # PAGE + THEME
 # ==============================
-st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ — Premium (Binance Style)")
+st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ — Premium")
 
 st.markdown(
     """
@@ -35,7 +35,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🚀 Análise Cripto PRO+ — Premium (Binance Style)")
+st.title("🚀 Análise Cripto PRO+ — Premium")
 
 # ==============================
 # COINS
@@ -423,4 +423,5 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Premium ativo: MA 7/25/99 + Volume clean + Média do Volume + Crosshair + Zoom + Arrastar + Janelas fixas por timeframe (2d/4d/7d) — estável no Streamlit Cloud.")
+
 
