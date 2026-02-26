@@ -16,14 +16,19 @@ with st.sidebar:
 
     auto_refresh = st.toggle("🔄 Atualização automática", value=False)
     refresh_seconds = st.select_slider("Intervalo (segundos)", options=[60, 120, 180, 300], value=120)
-
     if auto_refresh:
         st_autorefresh(interval=refresh_seconds * 1000, key="refresh")
 
     if st.button("🔁 Atualizar agora"):
         st.rerun()
 
-    timeframe = st.selectbox("Timeframe:", ["1h", "4h", "1d"], index=1)
+    timeframe = st.selectbox("Timeframe:", ["1h", "4h", "1d"], index=2)
+
+    janela = st.selectbox(
+        "Janela inicial do gráfico:",
+        ["7 dias", "14 dias", "30 dias", "90 dias", "Tudo"],
+        index=0
+    )
 
     indicadores = st.multiselect(
         "Indicadores:",
@@ -42,7 +47,6 @@ coin_map = {
     "PEPE/USDT": "pepe",
     "TURBO/USDT": "turbo",
 }
-
 meme_coins = ["DOGE/USDT", "PEPE/USDT", "TURBO/USDT"]
 
 moedas = st.multiselect(
@@ -56,7 +60,7 @@ moedas = st.multiselect(
 # COINGECKO (prices + volumes)
 # =============================
 @st.cache_data(ttl=300)
-def fetch_coingecko_market_chart(coin_id: str, days: int = 30):
+def fetch_coingecko_market_chart(coin_id: str, days: int = 90):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
     params = {"vs_currency": "usd", "days": days}
     headers = {"User-Agent": "Mozilla/5.0 (StreamlitApp)"}
@@ -70,27 +74,18 @@ def fetch_coingecko_market_chart(coin_id: str, days: int = 30):
     prices["timestamp"] = pd.to_datetime(prices["timestamp"], unit="ms", utc=True)
     volumes["timestamp"] = pd.to_datetime(volumes["timestamp"], unit="ms", utc=True)
 
-    df = prices.merge(volumes, on="timestamp", how="left")
-    df = df.sort_values("timestamp").reset_index(drop=True)
+    df = prices.merge(volumes, on="timestamp", how="left").sort_values("timestamp").reset_index(drop=True)
     df["price"] = df["price"].astype(float)
     df["volume"] = df["volume"].astype(float)
     return df
 
 def resample_to_ohlc(df_ticks: pd.DataFrame, tf: str) -> pd.DataFrame:
-    """
-    Converte série de preço+volume em OHLCV por timeframe.
-    """
-    df = df_ticks.copy()
-    df = df.set_index("timestamp")
-
+    df = df_ticks.copy().set_index("timestamp")
     rule_map = {"1h": "1H", "4h": "4H", "1d": "1D"}
-    rule = rule_map.get(tf, "4H")
-
+    rule = rule_map.get(tf, "1D")
     ohlc = df["price"].resample(rule).ohlc()
     vol = df["volume"].resample(rule).sum()
-
-    out = ohlc.join(vol)
-    out = out.dropna().reset_index()
+    out = ohlc.join(vol).dropna().reset_index()
     out.columns = ["timestamp", "open", "high", "low", "close", "volume"]
     return out
 
@@ -125,11 +120,24 @@ def add_indicators(df: pd.DataFrame, indicadores: list[str]) -> pd.DataFrame:
 
     return d
 
-# =============================
-# UI helper
-# =============================
 def price_fmt(moeda: str, price: float) -> str:
     return f"${price:,.6f}" if moeda in meme_coins else f"${price:,.2f}"
+
+def initial_range(df: pd.DataFrame, janela_label: str):
+    if df.empty:
+        return None, None
+    end = df["timestamp"].max()
+    if janela_label == "7 dias":
+        start = end - pd.Timedelta(days=7)
+    elif janela_label == "14 dias":
+        start = end - pd.Timedelta(days=14)
+    elif janela_label == "30 dias":
+        start = end - pd.Timedelta(days=30)
+    elif janela_label == "90 dias":
+        start = end - pd.Timedelta(days=90)
+    else:
+        start = df["timestamp"].min()
+    return start, end
 
 # =============================
 # LOOP PRINCIPAL
@@ -142,7 +150,7 @@ for moeda in moedas:
             st.warning("🧪 Meme coin — alta volatilidade")
 
         try:
-            ticks = fetch_coingecko_market_chart(coin_id, days=30)
+            ticks = fetch_coingecko_market_chart(coin_id, days=180)  # mais histórico p/ arrastar
         except Exception:
             st.error(f"Não foi possível obter dados para {moeda} via CoinGecko.")
             continue
@@ -165,20 +173,11 @@ for moeda in moedas:
             delta=f"{variacao_pct:.2f}%"
         )
 
-        # Alertas RSI
-        if "RSI" in indicadores and "RSI" in df.columns:
-            ultimo_rsi = df["RSI"].iloc[-1]
-            if pd.notna(ultimo_rsi):
-                if ultimo_rsi > 70:
-                    st.warning(f"⚠ RSI em Sobrecompra ({ultimo_rsi:.2f})")
-                elif ultimo_rsi < 30:
-                    st.warning(f"⚠ RSI em Sobrevenda ({ultimo_rsi:.2f})")
-
         # =============================
-        # SUBPLOTS (Preço + Volume + RSI + MACD)
+        # SUBPLOTS
         # =============================
         rows = 2
-        heights = [0.62, 0.18]
+        heights = [0.74, 0.10]  # volume bem menor (mais clean)
         titles = ["Preço", "Volume"]
 
         has_rsi = "RSI" in indicadores
@@ -186,12 +185,12 @@ for moeda in moedas:
 
         if has_rsi:
             rows += 1
-            heights.append(0.10)
+            heights.append(0.08)
             titles.append("RSI")
 
         if has_macd:
             rows += 1
-            heights.append(0.10)
+            heights.append(0.08)
             titles.append("MACD")
 
         fig = make_subplots(
@@ -205,11 +204,7 @@ for moeda in moedas:
 
         # Candles
         fig.add_trace(go.Candlestick(
-            x=df["timestamp"],
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
+            x=df["timestamp"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
             name="Preço"
         ), row=1, col=1)
 
@@ -222,49 +217,45 @@ for moeda in moedas:
             fig.add_trace(go.Scatter(x=df["timestamp"], y=df["BB_middle"], name="BB Middle", mode="lines"), row=1, col=1)
             fig.add_trace(go.Scatter(x=df["timestamp"], y=df["BB_lower"], name="BB Lower", mode="lines"), row=1, col=1)
 
-        # Volume (agora real)
+        # Volume (clean: opacidade e sem destaque)
         fig.add_trace(go.Bar(
             x=df["timestamp"],
             y=df["volume"],
-            name="Volume"
+            name="Volume",
+            opacity=0.35
         ), row=2, col=1)
 
         current_row = 3
 
-        # RSI subplot
+        # RSI
         if has_rsi and "RSI" in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df["timestamp"], y=df["RSI"], name="RSI", mode="lines"
-            ), row=current_row, col=1)
+            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["RSI"], name="RSI", mode="lines"), row=current_row, col=1)
             fig.add_hline(y=70, line_dash="dot", row=current_row, col=1)
             fig.add_hline(y=30, line_dash="dot", row=current_row, col=1)
             current_row += 1
 
-        # MACD subplot
+        # MACD
         if has_macd and "MACD" in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df["timestamp"], y=df["MACD"], name="MACD", mode="lines"
-            ), row=current_row, col=1)
-            fig.add_trace(go.Scatter(
-                x=df["timestamp"], y=df["MACD_signal"], name="Signal", mode="lines"
-            ), row=current_row, col=1)
+            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["MACD"], name="MACD", mode="lines"), row=current_row, col=1)
+            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["MACD_signal"], name="Signal", mode="lines"), row=current_row, col=1)
             if "MACD_hist" in df.columns:
-                fig.add_trace(go.Bar(
-                    x=df["timestamp"], y=df["MACD_hist"], name="Hist"
-                ), row=current_row, col=1)
+                fig.add_trace(go.Bar(x=df["timestamp"], y=df["MACD_hist"], name="Hist", opacity=0.35), row=current_row, col=1)
+
+        # Range inicial + slider para arrastar
+        start, end = initial_range(df, janela)
+        fig.update_xaxes(range=[start, end], row=1, col=1)
+        fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))  # slider estilo TradingView
 
         fig.update_layout(
             template="plotly_dark",
             height=820,
             hovermode="x unified",
-            xaxis_rangeslider_visible=False,
-            legend=dict(orientation="h", y=-0.2, x=0.5, xanchor="center")
+            legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center")
         )
 
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Últimos candles")
-        show_cols = ["timestamp", "open", "high", "low", "close", "volume"]
-        st.dataframe(df[show_cols].tail(15))
+        st.dataframe(df[["timestamp", "open", "high", "low", "close", "volume"]].tail(15))
 
 st.info("✅ Rodando via CoinGecko (estável no Streamlit Cloud).")
