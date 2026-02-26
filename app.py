@@ -578,7 +578,8 @@ for moeda in moedas:
                     apply_crosshair(fm)
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
-st.info("✅ Modo híbrido ativo)
+st.info("✅ Modo híbrido ativo")
+
 
 
 
