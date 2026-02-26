@@ -1,84 +1,49 @@
 import streamlit as st
 import pandas as pd
-import ccxt
 import plotly.graph_objs as go
-from streamlit_autorefresh import st_autorefresh
-import datetime
-import requests
 from plotly.subplots import make_subplots
+from streamlit_autorefresh import st_autorefresh
+import requests
+import datetime
 
 st.set_page_config(layout="wide", page_title="App Cripto PRO+")
 st.title("🚀 Análise Cripto PRO+")
 
 # =============================
-# CONTROLES (mais estável no Cloud)
+# CONTROLES
 # =============================
 auto_refresh = st.toggle("🔄 Atualização automática", value=False)
-refresh_seconds = st.select_slider("Intervalo (segundos)", options=[60, 120, 180, 300], value=120)
+refresh_seconds = st.select_slider("Intervalo (segundos)", options=[60,120,180,300], value=120)
 
 if auto_refresh:
     st_autorefresh(interval=refresh_seconds * 1000, key="refresh")
 
 # =============================
-# EXCHANGE (reutilizado)
+# LISTA FIXA (mais estável no cloud)
 # =============================
-@st.cache_resource
-def get_exchange():
-    # timeout ajuda em ambientes cloud
-    return ccxt.binance({"enableRateLimit": True, "timeout": 20000})
-
-exchange = get_exchange()
-
-# =============================
-# LISTA DE PARES (sem ccxt.load_markets) + FALLBACK
-# =============================
-FALLBACK_PAIRS = ["BTC/USDT", "ETH/USDT", "ADA/USDT", "DOGE/USDT", "PEPE/USDT", "TURBO/USDT", "NEIRO/USDT"]
-
-@st.cache_data(ttl=3600)
-def get_usdt_pairs_from_binance():
-    """
-    Busca a lista de pares USDT ativos direto do endpoint público da Binance.
-    Isso evita ExchangeNotAvailable do ccxt.load_markets no Streamlit Cloud.
-    """
-    try:
-        url = "https://api.binance.com/api/v3/exchangeInfo"
-        headers = {"User-Agent": "Mozilla/5.0 (StreamlitApp)"}
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-
-        pairs = []
-        for s in data.get("symbols", []):
-            if s.get("status") != "TRADING":
-                continue
-            if s.get("quoteAsset") != "USDT":
-                continue
-            base = s.get("baseAsset")
-            quote = s.get("quoteAsset")
-            if base and quote:
-                pairs.append(f"{base}/{quote}")
-
-        pairs = sorted(set(pairs))
-        return pairs if pairs else FALLBACK_PAIRS
-
-    except Exception:
-        return FALLBACK_PAIRS
-
-available_pairs = get_usdt_pairs_from_binance()
-
-# =============================
-# SELEÇÃO DE MOEDAS
-# =============================
-default_pair = "BTC/USDT" if "BTC/USDT" in available_pairs else available_pairs[0]
+available_pairs = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "ADA/USDT",
+    "DOGE/USDT",
+    "PEPE/USDT",
+    "TURBO/USDT",
+]
 
 moedas = st.multiselect(
     "Escolha até 3 criptos:",
     available_pairs,
-    default=[default_pair],
+    default=["BTC/USDT"],
     max_selections=3
 )
 
-timeframe = st.selectbox("Escolha o timeframe:", ["1d", "4h", "1h"])
+timeframe_map = {
+    "1d": "1d",
+    "4h": "4h",
+    "1h": "1h"
+}
+
+timeframe = st.selectbox("Escolha o timeframe:", list(timeframe_map.keys()))
 
 indicadores = st.multiselect(
     "Indicadores:",
@@ -86,86 +51,73 @@ indicadores = st.multiselect(
     default=["SMA20", "RSI", "MACD", "Bollinger Bands"]
 )
 
-# Meme coins (só pra avisos / formato)
-meme_coins = ["DOGE/USDT", "PEPE/USDT", "TURBO/USDT", "NEIRO/USDT"]
+meme_coins = ["DOGE/USDT", "PEPE/USDT", "TURBO/USDT"]
 
 # =============================
-# DADOS (BINANCE + FALLBACK) com CACHE
+# BUSCA DADOS DIRETO NA BINANCE (REST)
 # =============================
-@st.cache_data(ttl=300)  # 5 min
-def fetch_ohlcv_safe(symbol, timeframe="1d"):
-    # 1) Binance (principal)
+@st.cache_data(ttl=300)
+def fetch_binance_data(symbol, interval):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df, "Binance"
-    except Exception:
-        pass
+        base = symbol.replace("/", "")
+        url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": base,
+            "interval": interval,
+            "limit": 500
+        }
 
-    # 2) CoinGecko (fallback - pode falhar em alguns tickers)
-    try:
-        coin_id = symbol.split("/")[0].lower()
-        days_map = {"1d": 90, "4h": 30, "1h": 7}
-        days = days_map.get(timeframe, 90)
-
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-        params = {"vs_currency": "usd", "days": days}
-        headers = {"User-Agent": "Mozilla/5.0 (StreamlitApp)"}
-
+        headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, params=params, headers=headers, timeout=15)
         r.raise_for_status()
+
         data = r.json()
 
-        df = pd.DataFrame(data['prices'], columns=['timestamp', 'close'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df['open'] = df['close']
-        df['high'] = df['close']
-        df['low'] = df['close']
-        df['volume'] = 0
+        df = pd.DataFrame(data, columns=[
+            "timestamp","open","high","low","close","volume",
+            "_","_","_","_","_","_"
+        ])
 
-        return df, "CoinGecko"
+        df = df[["timestamp","open","high","low","close","volume"]]
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
+
+        return df
+
     except Exception:
-        return None, None
+        return None
 
 # =============================
 # LOOP PRINCIPAL
 # =============================
 for moeda in moedas:
-    with st.expander(f"Detalhes de {moeda}", expanded=False):
+
+    with st.expander(f"Detalhes de {moeda}", expanded=True):
 
         if moeda in meme_coins:
             st.warning("🧪 Meme coin — alta volatilidade")
 
-        df_full, source = fetch_ohlcv_safe(moeda, timeframe)
+        df = fetch_binance_data(moeda, timeframe_map[timeframe])
 
-        if df_full is None:
+        if df is None or df.empty:
             st.error(f"Não foi possível obter dados para {moeda}.")
             continue
 
-        st.info(f"Dados obtidos de: {source}")
-
+        # FILTRA MÊS ATUAL
         now = datetime.datetime.now()
-        df_mes = df_full[
-            (df_full['timestamp'].dt.month == now.month) &
-            (df_full['timestamp'].dt.year == now.year)
+        df_mes = df[
+            (df["timestamp"].dt.month == now.month) &
+            (df["timestamp"].dt.year == now.year)
         ].copy()
 
         if df_mes.empty:
-            st.warning(f"Não há dados para {moeda} no mês atual.")
-            continue
+            df_mes = df.tail(100)
 
-        # =============================
-        # ESTATÍSTICAS DO PERÍODO
-        # =============================
-        preco_inicial = df_mes['close'].iloc[0]
-        preco_final = df_mes['close'].iloc[-1]
+        preco_inicial = df_mes["close"].iloc[0]
+        preco_final = df_mes["close"].iloc[-1]
         variacao_pct = ((preco_final - preco_inicial) / preco_inicial) * 100
-        variacao_cor = "green" if variacao_pct >= 0 else "red"
-
-        max_periodo = df_mes['high'].max()
-        min_periodo = df_mes['low'].min()
-        ultimo_preco = df_mes['close'].iloc[-1]
+        ultimo_preco = df_mes["close"].iloc[-1]
 
         preco_fmt = f"${ultimo_preco:,.6f}" if moeda in meme_coins else f"${ultimo_preco:,.2f}"
 
@@ -175,142 +127,59 @@ for moeda in moedas:
             delta=f"{variacao_pct:.2f}%"
         )
 
-        st.markdown(
-            f"### 📊 Variação do período: "
-            f"<span style='color:{variacao_cor}'>{variacao_pct:.2f}%</span>",
-            unsafe_allow_html=True
-        )
-
-        if moeda in meme_coins:
-            st.write(f"🔼 Máxima: {max_periodo:.6f}")
-            st.write(f"🔽 Mínima: {min_periodo:.6f}")
-        else:
-            st.write(f"🔼 Máxima: {max_periodo:.2f}")
-            st.write(f"🔽 Mínima: {min_periodo:.2f}")
-
         # =============================
         # INDICADORES
         # =============================
-        ultimo_rsi = None
-
         if "SMA20" in indicadores:
-            df_mes['SMA20'] = df_mes['close'].rolling(20).mean()
+            df_mes["SMA20"] = df_mes["close"].rolling(20).mean()
 
         if "RSI" in indicadores:
-            delta = df_mes['close'].diff()
+            delta = df_mes["close"].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
             avg_gain = gain.rolling(14).mean()
             avg_loss = loss.rolling(14).mean()
             rs = avg_gain / avg_loss
-            df_mes['RSI'] = 100 - (100 / (1 + rs))
-
-            ultimo_rsi = df_mes['RSI'].iloc[-1]
-            if pd.notna(ultimo_rsi):
-                if ultimo_rsi > 70:
-                    st.warning(f"⚠ RSI em Sobrecompra ({ultimo_rsi:.2f})")
-                elif ultimo_rsi < 30:
-                    st.warning(f"⚠ RSI em Sobrevenda ({ultimo_rsi:.2f})")
-
-        if "Bollinger Bands" in indicadores:
-            df_mes['BB_middle'] = df_mes['close'].rolling(20).mean()
-            df_mes['BB_std'] = df_mes['close'].rolling(20).std()
-            df_mes['BB_upper'] = df_mes['BB_middle'] + 2 * df_mes['BB_std']
-            df_mes['BB_lower'] = df_mes['BB_middle'] - 2 * df_mes['BB_std']
+            df_mes["RSI"] = 100 - (100 / (1 + rs))
 
         if "MACD" in indicadores:
-            ema12 = df_mes['close'].ewm(span=12, adjust=False).mean()
-            ema26 = df_mes['close'].ewm(span=26, adjust=False).mean()
-            df_mes['MACD'] = ema12 - ema26
-            df_mes['MACD_signal'] = df_mes['MACD'].ewm(span=9, adjust=False).mean()
+            ema12 = df_mes["close"].ewm(span=12, adjust=False).mean()
+            ema26 = df_mes["close"].ewm(span=26, adjust=False).mean()
+            df_mes["MACD"] = ema12 - ema26
+            df_mes["MACD_signal"] = df_mes["MACD"].ewm(span=9, adjust=False).mean()
 
         # =============================
-        # SINAIS AUTOMÁTICOS
+        # GRÁFICO
         # =============================
-        if ("RSI" in indicadores) and ("MACD" in indicadores) and (ultimo_rsi is not None) and pd.notna(ultimo_rsi):
-            if ultimo_rsi < 30 and df_mes['MACD'].iloc[-1] > df_mes['MACD_signal'].iloc[-1]:
-                st.success("🟢 Sinal de COMPRA confirmado")
-            elif ultimo_rsi > 70 and df_mes['MACD'].iloc[-1] < df_mes['MACD_signal'].iloc[-1]:
-                st.error("🔴 Sinal de VENDA confirmado")
-
-        # =============================
-        # SUBPLOTS
-        # =============================
-        rows_count = 2
-        row_heights = [0.65, 0.15]
-        row_titles_list = ["Preço", "Volume"]
-
-        if "RSI" in indicadores:
-            rows_count += 1
-            row_heights.append(0.1)
-            row_titles_list.append("RSI")
-
-        if "MACD" in indicadores:
-            rows_count += 1
-            row_heights.append(0.1)
-            row_titles_list.append("MACD")
-
-        fig = make_subplots(
-            rows=rows_count,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.02,
-            row_titles=row_titles_list,
-            row_heights=row_heights
-        )
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True)
 
         fig.add_trace(go.Candlestick(
-            x=df_mes['timestamp'],
-            open=df_mes['open'],
-            high=df_mes['high'],
-            low=df_mes['low'],
-            close=df_mes['close'],
-            increasing_line_color='#0ECB81',
-            decreasing_line_color='#F6465D',
+            x=df_mes["timestamp"],
+            open=df_mes["open"],
+            high=df_mes["high"],
+            low=df_mes["low"],
+            close=df_mes["close"],
             name="Preço"
         ), row=1, col=1)
 
-        fig.add_hline(
-            y=ultimo_preco,
-            line_dash="dot",
-            line_color="rgba(255,255,255,0.4)",
-            row=1,
-            col=1
-        )
-
-        volume_colors = [
-            '#0ECB81' if c >= o else '#F6465D'
-            for o, c in zip(df_mes['open'], df_mes['close'])
-        ]
-
         fig.add_trace(go.Bar(
-            x=df_mes['timestamp'],
-            y=df_mes['volume'],
-            marker_color=volume_colors,
+            x=df_mes["timestamp"],
+            y=df_mes["volume"],
             name="Volume"
         ), row=2, col=1)
 
         fig.update_layout(
-            title=f"{moeda} - Análise PRO+",
             template="plotly_dark",
-            height=720,
-            hovermode="x unified",
+            height=700,
             xaxis_rangeslider_visible=False
         )
 
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Últimos preços")
-
-        if moeda in meme_coins:
-            st.dataframe(
-                df_mes[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-                .round(6).tail(10)
-            )
-        else:
-            st.dataframe(df_mes.tail(10))
+        st.dataframe(df_mes.tail(10))
 
 if auto_refresh:
     st.info(f"🔄 Atualização automática a cada {refresh_seconds} segundos.")
 else:
-    st.info("🔄 Atualização automática desativada (ligue no toggle acima).")
+    st.info("🔄 Atualização automática desativada.")
