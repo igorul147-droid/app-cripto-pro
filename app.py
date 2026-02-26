@@ -57,7 +57,7 @@ moedas = st.multiselect(
 # Data fetch (CoinGecko)
 # -----------------------------
 @st.cache_data(ttl=300)
-def fetch_coingecko_market_chart(coin_id: str, days: int = 365):
+def fetch_coingecko_market_chart(coin_id: str, days: int):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
     params = {"vs_currency": "usd", "days": days}
     headers = {"User-Agent": "Mozilla/5.0 (StreamlitApp)"}
@@ -74,17 +74,25 @@ def fetch_coingecko_market_chart(coin_id: str, days: int = 365):
     df = prices.merge(volumes, on="timestamp", how="left").sort_values("timestamp").reset_index(drop=True)
     df["price"] = df["price"].astype(float)
     df["volume"] = df["volume"].astype(float)
+
+    # às vezes vem timestamp repetido
+    df = df.drop_duplicates(subset=["timestamp"], keep="last")
     return df
 
 def resample_to_ohlc(df_ticks: pd.DataFrame, tf: str) -> pd.DataFrame:
-    df = df_ticks.copy().set_index("timestamp")
+    df = df_ticks.copy().set_index("timestamp").sort_index()
+
     rule_map = {"1h": "1H", "4h": "4H", "1d": "1D"}
     rule = rule_map.get(tf, "1D")
 
     ohlc = df["price"].resample(rule).ohlc()
     vol = df["volume"].resample(rule).sum()
 
-    out = ohlc.join(vol).dropna().reset_index()
+    out = ohlc.join(vol)
+    out = out.dropna()
+    out = out[out["close"] > 0]
+
+    out = out.reset_index()
     out.columns = ["timestamp", "open", "high", "low", "close", "volume"]
     return out
 
@@ -150,7 +158,7 @@ def add_range_buttons(fig):
     )
 
 # -----------------------------
-# Tabs (melhor leitura)
+# Tabs
 # -----------------------------
 tab_chart, tab_rsi, tab_macd = st.tabs(["📈 Gráfico", "📉 RSI", "📊 MACD"])
 
@@ -158,14 +166,20 @@ for moeda in moedas:
     coin_id = coin_map[moeda]
 
     with st.expander(f"Detalhes de {moeda}", expanded=True):
+
+        # Dias de histórico por timeframe (para candle ficar certo)
+        days_map = {"1h": 14, "4h": 90, "1d": 365}
+        days = days_map.get(timeframe, 90)
+
         try:
-            ticks = fetch_coingecko_market_chart(coin_id, days=365)
+            ticks = fetch_coingecko_market_chart(coin_id, days=days)
         except Exception:
             st.error(f"Falha ao buscar dados no CoinGecko para {moeda}.")
             continue
 
         df = resample_to_ohlc(ticks, timeframe)
         df = add_indicators(df, show_sma, show_bb, show_rsi, show_macd)
+
         if df.empty:
             st.error("Sem dados suficientes.")
             continue
@@ -200,7 +214,7 @@ for moeda in moedas:
                 showlegend=False
             ), row=1, col=1)
 
-            # SMA / BB (sem entupir a legenda)
+            # SMA / BB (sem legenda gigante)
             if show_sma and "SMA20" in df.columns:
                 fig.add_trace(go.Scatter(
                     x=df["timestamp"], y=df["SMA20"],
@@ -213,7 +227,7 @@ for moeda in moedas:
                 fig.add_trace(go.Scatter(x=df["timestamp"], y=df["BB_middle"], mode="lines", name="BB Mid", showlegend=False), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df["timestamp"], y=df["BB_lower"], mode="lines", name="BB Low", showlegend=False), row=1, col=1)
 
-            # Volume clean (discreto)
+            # Volume clean
             fig.add_trace(go.Bar(
                 x=df["timestamp"],
                 y=df["volume"],
@@ -273,4 +287,7 @@ for moeda in moedas:
                 st.plotly_chart(fig_m, use_container_width=True)
 
         st.caption("Dica: Use o slider abaixo do gráfico pra arrastar e navegar no tempo.")
+
+st.info("✅ Rodando via CoinGecko (estável no Streamlit Cloud).")
+
 
