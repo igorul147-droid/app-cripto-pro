@@ -1,9 +1,9 @@
 import time
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import requests
 
@@ -36,7 +36,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🚀 Análise Cripto PRO+ — Premium")
+st.title("🚀 Análise Cripto PRO+ — Premium (B: TradingView Candles)")
 
 # ==============================
 # COINS
@@ -77,23 +77,20 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📌 Indicadores (premium)")
-    show_ma = st.toggle("MA 7/25/99 (igual Binance)", value=True)
-    show_bb = st.toggle("Bollinger Bands (20, 2)", value=False)
     show_rsi = st.toggle("RSI (14)", value=True)
     show_macd = st.toggle("MACD (12/26/9)", value=True)
 
     st.divider()
-    st.subheader("📊 Volume")
-    clean_volume = st.toggle("Volume clean (mais discreto)", value=True)
-    volume_colored = st.toggle("Volume verde/vermelho", value=True)
-    show_vol_ma = st.toggle("Média do volume (linha)", value=True)
-    vol_ma_period = st.slider("Período média do volume", 5, 50, 20, 1)
+    st.subheader("🎛️ Aparência")
+    chart_height = st.slider("Altura do gráfico", 520, 980, 760, 10)
 
     st.divider()
-    st.subheader("🎛️ Aparência")
-    show_price_line = st.toggle("Linha do preço atual", value=True)
-    show_crosshair = st.toggle("Crosshair (spikes)", value=True)
-    chart_height = st.slider("Altura do gráfico", 620, 980, 840, 10)
+    st.subheader("📈 Fonte do TradingView")
+    tv_exchange = st.selectbox(
+        "Preferência de exchange no gráfico:",
+        ["BINANCE (recomendado)", "BYBIT", "OKX", "KUCOIN"],
+        index=0
+    )
 
     st.divider()
     debug_mode = st.toggle("🧪 Debug (mostrar erros das fontes)", value=True)
@@ -110,11 +107,10 @@ def timeframe_freq(tf: str) -> str:
     return {"1h": "1H", "4h": "4H", "1d": "1D"}.get(tf, "1D")
 
 def window_days_for_timeframe(tf: str) -> int:
-    # regra do Igor
+    # regra: 1h = 2d, 4h = 4d, 1d = 7d
     return {"1h": 2, "4h": 4, "1d": 7}.get(tf, 7)
 
 def limit_for_timeframe(tf: str) -> int:
-    # limites seguros pra APIs
     return {"1h": 800, "4h": 600, "1d": 400}.get(tf, 400)
 
 def symbol_compact(moeda: str) -> str:
@@ -128,23 +124,15 @@ def apply_time_window(df: pd.DataFrame, window_days: int) -> pd.DataFrame:
     return df[df["timestamp"] >= start].copy()
 
 def ensure_timestamp_utc(series: pd.Series) -> pd.Series:
-    # garante datetime UTC tz-aware
     s = series
     if not pd.api.types.is_datetime64_any_dtype(s):
         s = pd.to_datetime(s, utc=True, errors="coerce")
     else:
-        # se veio tz-naive, assume UTC
         if getattr(s.dt, "tz", None) is None:
             s = s.dt.tz_localize("UTC")
         else:
             s = s.dt.tz_convert("UTC")
     return s
-
-def to_local_naive(df: pd.DataFrame) -> pd.DataFrame:
-    # converte pra horário do Brasil e deixa "naive" pro Plotly renderizar bonito
-    d = df.copy()
-    d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
-    return d
 
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -157,21 +145,15 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     if "volume" not in d.columns:
         d["volume"] = 0.0
     d["volume"] = d["volume"].fillna(0.0)
-    # importante: deixa em UTC aqui (cálculos), converte pra local só antes do plot
     return d
 
 def resample_to_ohlcv(df_close_vol: pd.DataFrame, tf: str) -> pd.DataFrame:
-    """
-    df_close_vol: colunas timestamp(UTC), close, volume
-    resample em OHLCV real (isso resolve os candles 'tracinhos' do CoinGecko)
-    """
     d = df_close_vol.copy()
     d["timestamp"] = ensure_timestamp_utc(d["timestamp"])
     d = d.sort_values("timestamp").dropna(subset=["close"]).reset_index(drop=True)
     d = d.set_index("timestamp")
 
     freq = timeframe_freq(tf)
-
     ohlc = d["close"].resample(freq).ohlc()
     vol = d["volume"].resample(freq).sum().rename("volume")
 
@@ -180,45 +162,8 @@ def resample_to_ohlcv(df_close_vol: pd.DataFrame, tf: str) -> pd.DataFrame:
     out.columns = ["timestamp", "open", "high", "low", "close", "volume"]
     return normalize_ohlcv(out)
 
-def add_range_buttons(fig):
-    fig.update_xaxes(
-        rangeselector=dict(
-            buttons=list([
-                dict(count=12, label="12H", step="hour", stepmode="backward"),
-                dict(count=1, label="1D", step="day", stepmode="backward"),
-                dict(count=2, label="2D", step="day", stepmode="backward"),
-                dict(count=4, label="4D", step="day", stepmode="backward"),
-                dict(count=7, label="1W", step="day", stepmode="backward"),
-                dict(step="all", label="ALL"),
-            ])
-        )
-    )
-
-def apply_crosshair(fig):
-    fig.update_layout(hovermode="x unified", spikedistance=-1)
-    fig.update_xaxes(
-        showspikes=True, spikemode="across", spikesnap="cursor",
-        spikethickness=1, spikecolor="rgba(255,255,255,0.35)",
-    )
-    fig.update_yaxes(
-        showspikes=True, spikemode="across", spikesnap="cursor",
-        spikethickness=1, spikecolor="rgba(255,255,255,0.25)",
-    )
-
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-
-    if show_ma:
-        d["MA7"] = d["close"].rolling(7).mean()
-        d["MA25"] = d["close"].rolling(25).mean()
-        d["MA99"] = d["close"].rolling(99).mean()
-
-    if show_bb:
-        mid = d["close"].rolling(20).mean()
-        std = d["close"].rolling(20).std()
-        d["BB_MID"] = mid
-        d["BB_UP"] = mid + 2 * std
-        d["BB_LOW"] = mid - 2 * std
 
     if show_rsi:
         delta = d["close"].diff()
@@ -235,9 +180,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         d["MACD"] = ema12 - ema26
         d["SIGNAL"] = d["MACD"].ewm(span=9, adjust=False).mean()
         d["HIST"] = d["MACD"] - d["SIGNAL"]
-
-    if show_vol_ma:
-        d["VOL_MA"] = d["volume"].rolling(vol_ma_period).mean()
 
     return d
 
@@ -281,7 +223,6 @@ def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
     if str(j.get("retCode")) != "0":
         raise RuntimeError(f"Bybit retCode={j.get('retCode')} msg={j.get('retMsg')}")
     rows = j["result"]["list"]
-    # Bybit v5: [startTime, open, high, low, close, volume, turnover]
     df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
     df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
     df = df[["timestamp", "open", "high", "low", "close", "volume"]]
@@ -312,10 +253,6 @@ def coingecko_resolve_id(query: str) -> str:
 
 @st.cache_data(ttl=300)
 def fetch_coingecko_prices_and_volumes(coin_id: str, days: int) -> pd.DataFrame:
-    """
-    Puxa close + volume no CoinGecko e devolve timestamp(UTC), close, volume.
-    Depois nós resampleamos em OHLCV real pro timeframe desejado.
-    """
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
     j = request_json(url, {"vs_currency": "usd", "days": days})
 
@@ -361,7 +298,6 @@ def build_dataset_hybrid(moeda: str, timeframe: str):
 
     # 3) CoinGecko (fallback com resample)
     try:
-        # dias "grossos" pra garantir janela + resample
         days_fetch = 5 if timeframe == "1h" else 12 if timeframe == "4h" else 30
 
         cg_id = coin_map.get(moeda)
@@ -382,9 +318,56 @@ def build_dataset_hybrid(moeda: str, timeframe: str):
     raise RuntimeError("Falha geral de dados", errors)
 
 # ==============================
+# TRADINGVIEW (B)
+# ==============================
+def tradingview_widget(symbol: str, interval: str, height: int = 680):
+    html = f"""
+    <div class="tradingview-widget-container">
+      <div id="tv_chart"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget(
+      {{
+        "autosize": true,
+        "symbol": "{symbol}",
+        "interval": "{interval}",
+        "timezone": "{TZ_LOCAL}",
+        "theme": "dark",
+        "style": "1",
+        "locale": "pt",
+        "enable_publishing": false,
+        "allow_symbol_change": false,
+        "hide_top_toolbar": false,
+        "hide_legend": false,
+        "withdateranges": true,
+        "details": false,
+        "hotlist": false,
+        "calendar": false,
+        "container_id": "tv_chart"
+      }});
+      </script>
+    </div>
+    <style>
+      #tv_chart {{
+        height: {height}px;
+      }}
+    </style>
+    """
+    components.html(html, height=height, scrolling=False)
+
+def tv_exchange_prefix(choice: str) -> str:
+    if choice.startswith("BYBIT"):
+        return "BYBIT"
+    if choice.startswith("OKX"):
+        return "OKX"
+    if choice.startswith("KUCOIN"):
+        return "KUCOIN"
+    return "BINANCE"
+
+# ==============================
 # TABS
 # ==============================
-tab_chart, tab_rsi, tab_macd = st.tabs(["📈 Gráfico", "📉 RSI", "📊 MACD"])
+tab_chart, tab_rsi, tab_macd = st.tabs(["📈 Gráfico (TradingView)", "📉 RSI", "📊 MACD"])
 
 # ==============================
 # MAIN
@@ -410,27 +393,22 @@ for moeda in moedas:
                     st.code(f"{k}: {v}", language="text")
             continue
 
-        # janela fixa (2d/4d/7d)
         df_view_utc = apply_time_window(df_full_utc, window_days)
         if df_view_utc.empty or len(df_view_utc) < 10:
             st.warning("Poucos dados para renderizar. Tente outro timeframe.")
             st.caption(f"Fonte: {source}")
             continue
 
-        # indicadores (em UTC)
         df_view_utc = add_indicators(df_view_utc)
-
-        # converte pra Brasil só pra plot/tooltip
-        df_view = to_local_naive(df_view_utc)
 
         ultimo = float(df_view_utc["close"].iloc[-1])
         first = float(df_view_utc["close"].iloc[0])
         var_pct = ((ultimo - first) / first) * 100 if first else 0.0
 
-        st.caption(f"📡 Fonte: **{source}**")
+        st.caption(f"📡 Fonte (dados/métricas): **{source}**")
         st.markdown(
             f"<span class='badge'>Timeframe: <b>{timeframe}</b></span>"
-            f"<span class='badge'>Janela: <b>{window_days} dias</b></span>"
+            f"<span class='badge'>Janela métricas: <b>{window_days} dias</b></span>"
             f"<span class='badge'>TZ: <b>{TZ_LOCAL}</b></span>",
             unsafe_allow_html=True
         )
@@ -441,145 +419,61 @@ for moeda in moedas:
         k3.metric("📉 Mínima (janela)", fmt_price(moeda, float(df_view_utc["low"].min())))
 
         # ======================
-        # CHART
+        # TRADINGVIEW CHART
         # ======================
         with tab_chart:
-            fig = make_subplots(
-                rows=2, cols=1, shared_xaxes=True,
-                row_heights=[0.82, 0.18],
-                vertical_spacing=0.02,
-                row_titles=["Preço", "Volume"]
+            tv_interval = {"1h": "60", "4h": "240", "1d": "D"}[timeframe]
+            prefix = tv_exchange_prefix(tv_exchange)
+
+            tv_symbol = f"{prefix}:{symbol_compact(moeda)}"
+
+            st.caption(f"📈 Candles estilo exchange (TradingView) — {tv_symbol} • intervalo {tv_interval}")
+            tradingview_widget(tv_symbol, tv_interval, height=chart_height)
+
+            st.markdown(
+                "<div class='small-note'>Se algum par não aparecer (ex: TURBOUSDT), troque a exchange no menu lateral.</div>",
+                unsafe_allow_html=True
             )
 
-            # Candles mais "fortes"
-            fig.add_trace(
-                go.Candlestick(
-                    x=df_view["timestamp"],
-                    open=df_view["open"], high=df_view["high"], low=df_view["low"], close=df_view["close"],
-                    increasing_line_color="#00C896",
-                    decreasing_line_color="#FF4B4B",
-                    increasing_fillcolor="rgba(0,200,150,0.88)",
-                    decreasing_fillcolor="rgba(255,75,75,0.88)",
-                    whiskerwidth=0.7,
-                    showlegend=False,
-                    name="Preço",
-                    hovertemplate=(
-                        "<b>%{x|%d/%m/%Y %H:%M}</b><br>"
-                        "Open: %{open}<br>"
-                        "High: %{high}<br>"
-                        "Low: %{low}<br>"
-                        "Close: %{close}<extra></extra>"
-                    )
-                ),
-                row=1, col=1
-            )
-
-            if show_price_line:
-                fig.add_hline(y=ultimo, line_dash="dot", opacity=0.55, row=1, col=1)
-
-            # MAs
-            if show_ma and "MA7" in df_view.columns:
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA7"], mode="lines", opacity=0.9, name="MA7"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA25"], mode="lines", opacity=0.9, name="MA25"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA99"], mode="lines", opacity=0.9, name="MA99"), row=1, col=1)
-
-            # BB
-            if show_bb and "BB_UP" in df_view.columns:
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_UP"], mode="lines", opacity=0.55, name="BB Upper"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_MID"], mode="lines", opacity=0.55, name="BB Mid"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_LOW"], mode="lines", opacity=0.55, name="BB Lower"), row=1, col=1)
-
-            # Volume
-            if volume_colored:
-                vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_view["open"], df_view["close"])]
-            else:
-                vol_colors = "rgba(255,255,255,0.22)"
-
-            fig.add_trace(
-                go.Bar(
-                    x=df_view["timestamp"],
-                    y=df_view["volume"],
-                    marker_color=vol_colors,
-                    opacity=0.18 if clean_volume else 0.42,
-                    showlegend=False,
-                    hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Volume: %{y}<extra></extra>"
-                ),
-                row=2, col=1
-            )
-
-            if show_vol_ma and "VOL_MA" in df_view.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_view["timestamp"],
-                        y=df_view["VOL_MA"],
-                        mode="lines",
-                        opacity=0.75,
-                        name="Vol MA",
-                        hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Vol MA: %{y}<extra></extra>"
-                    ),
-                    row=2, col=1
-                )
-
-            # rangeslider e botões
-            fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
-            add_range_buttons(fig)
-
-            fig.update_layout(
-                template="plotly_dark",
-                height=chart_height,
-                margin=dict(l=10, r=10, t=10, b=10),
-                dragmode="pan",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            )
-            fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)")
-            fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)")
-
-            if show_crosshair:
-                apply_crosshair(fig)
-            else:
-                fig.update_layout(hovermode="x unified")
-
-            st.plotly_chart(
-                fig, use_container_width=True,
-                config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]}
-            )
-            st.markdown("<div class='small-note'>Dica: slider inferior para arrastar no tempo. Scroll do mouse = zoom.</div>", unsafe_allow_html=True)
-
-        # RSI
+        # ======================
+        # RSI (PLOTLY)
+        # ======================
         with tab_rsi:
-            if not show_rsi or "RSI" not in df_view.columns:
+            if not show_rsi or "RSI" not in df_view_utc.columns:
                 st.info("Ative RSI no menu lateral.")
             else:
+                # Converte apenas pro plot (local)
+                d = df_view_utc.copy()
+                d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
+
                 fr = go.Figure()
-                fr.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["RSI"], mode="lines", name="RSI"))
+                fr.add_trace(go.Scatter(x=d["timestamp"], y=d["RSI"], mode="lines", name="RSI"))
                 fr.add_hline(y=70, line_dash="dot", opacity=0.55)
                 fr.add_hline(y=30, line_dash="dot", opacity=0.55)
                 fr.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
                 fr.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
-                add_range_buttons(fr)
-                if show_crosshair:
-                    apply_crosshair(fr)
                 st.plotly_chart(fr, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
-        # MACD
+        # ======================
+        # MACD (PLOTLY)
+        # ======================
         with tab_macd:
-            if not show_macd or "MACD" not in df_view.columns:
+            if not show_macd or "MACD" not in df_view_utc.columns:
                 st.info("Ative MACD no menu lateral.")
             else:
+                d = df_view_utc.copy()
+                d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
+
                 fm = go.Figure()
-                fm.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MACD"], mode="lines", name="MACD"))
-                fm.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["SIGNAL"], mode="lines", name="Signal"))
-                if "HIST" in df_view.columns:
-                    fm.add_trace(go.Bar(x=df_view["timestamp"], y=df_view["HIST"], name="Hist", opacity=0.25))
+                fm.add_trace(go.Scatter(x=d["timestamp"], y=d["MACD"], mode="lines", name="MACD"))
+                fm.add_trace(go.Scatter(x=d["timestamp"], y=d["SIGNAL"], mode="lines", name="Signal"))
+                if "HIST" in d.columns:
+                    fm.add_trace(go.Bar(x=d["timestamp"], y=d["HIST"], name="Hist", opacity=0.25))
                 fm.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
                 fm.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
-                add_range_buttons(fm)
-                if show_crosshair:
-                    apply_crosshair(fm)
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
-st.info("✅ Modo híbrido ativo")
-
+st.info("✅ Modo híbrido ativo (métricas): Bybit → Binance → CoinGecko (fallback). | Gráfico: TradingView (candles perfeitos).")
 
 
 
