@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.utils import PlotlyJSONEncoder
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 
@@ -175,11 +176,29 @@ def fetch_binance_usdt_spot_pairs() -> list[str]:
 # BINANCE: OHLCV (PAGINADO) p/ HISTÓRICO MAIOR
 # ==============================
 def _binance_klines(symbol: str, interval: str, limit: int = 1000, endTime: int | None = None):
-    url = "https://api.binance.com/api/v3/klines"
+    """
+    Klines com fallback de endpoints (resolve bloqueios do Streamlit Cloud).
+    """
+    endpoints = [
+        "https://api.binance.com/api/v3/klines",
+        "https://api1.binance.com/api/v3/klines",
+        "https://api2.binance.com/api/v3/klines",
+        "https://api3.binance.com/api/v3/klines",
+        "https://data-api.binance.vision/api/v3/klines",
+    ]
+
     params = {"symbol": symbol, "interval": interval, "limit": str(limit)}
     if endTime is not None:
         params["endTime"] = str(endTime)
-    return request_json(url, params=params, attempts=3, base_sleep=0.7)
+
+    last_err = None
+    for url in endpoints:
+        try:
+            return request_json(url, params=params, attempts=2, base_sleep=0.6)
+        except Exception as e:
+            last_err = e
+
+    raise last_err
 
 @st.cache_data(ttl=180)
 def fetch_binance_ohlcv_paged(symbol: str, timeframe: str, candles_target: int = 4000) -> pd.DataFrame:
@@ -202,7 +221,7 @@ def fetch_binance_ohlcv_paged(symbol: str, timeframe: str, candles_target: int =
         batch_limit = 1000 if remaining > 1000 else max(200, remaining)
         j = _binance_klines(symbol, interval, limit=batch_limit, endTime=end_time)
         if not j:
-            break
+            raise RuntimeError("Binance klines vazio (endpoint respondeu, mas veio sem candles).")
 
         # j é lista de listas
         # [ open_time, open, high, low, close, volume, close_time, ...]
@@ -408,7 +427,7 @@ def apply_crosshair(fig):
 # ==============================
 def plotly_autoy_html(fig: go.Figure, height: int = 860) -> str:
     fig_dict = fig.to_plotly_json()
-    payload = json.dumps(fig_dict)
+    payload = json.dumps(fig_dict, cls=PlotlyJSONEncoder)
 
     return f"""
     <div id="chart" style="width:100%;height:{height}px;"></div>
@@ -760,6 +779,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
