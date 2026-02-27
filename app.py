@@ -680,7 +680,7 @@ for moeda in moedas:
         # ======================
         # CHART (AUTO-Y estilo Binance)
         # ======================
-       with tab_chart:
+with tab_chart:
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.82, 0.18],
@@ -843,6 +843,7 @@ with tab_macd:
         st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
