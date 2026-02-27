@@ -427,121 +427,100 @@ def apply_crosshair(fig):
 # ==============================
 # PLOTLY AUTO-Y (igual Binance) via HTML+JS
 # ==============================
-def plotly_autoy_html(fig, height: int = 840) -> str:
-    """
-    Renderiza um Plotly dentro de um HTML com Auto-Y:
-    sempre que o usuário faz pan/zoom no X, recalcula o Y
-    com base SOMENTE nos pontos visíveis.
-    """
+def plotly_autoy_html(fig, height=840):
 
     fig_dict = fig.to_plotly_json()
     payload = json.dumps(fig_dict, cls=PlotlyJSONEncoder)
 
-    return f"""
-<div id="plotly_autoy" style="width:100%;height:{height}px;"></div>
+    html = """
+<div id="plotly_autoy" style="width:100%;height:""" + str(height) + """px;"></div>
 
 <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
 <script>
-(function () {{
-  const fig = {payload};
+(function () {
+
+  const fig = """ + payload + """;
   const gd = document.getElementById('plotly_autoy');
 
-  // Render
-  Plotly.newPlot(gd, fig.data, fig.layout, fig.config).then(() => {{
-    // Ajuste inicial de Y baseado no range atual
+  Plotly.newPlot(gd, fig.data, fig.layout, fig.config).then(() => {
     autoY();
-  }});
+  });
 
-  // Debounce pra não travar
   let t = null;
 
-  // AutoY quando mexer no X
-  gd.on('plotly_relayout', (ev) => {{
-    // só reage se mexeu no X (zoom/pan)
+  gd.on('plotly_relayout', (ev) => {
+
     const touchedX =
-      ev['xaxis.range[0]'] || ev['xaxis.range[1]'] ||
+      ev['xaxis.range[0]'] ||
+      ev['xaxis.range[1]'] ||
       ev['xaxis.autorange'] ||
-      ev['xaxis.range'] ||
-      ev['xaxis.rangeslider.range'];
+      ev['xaxis.range'];
 
     if (!touchedX) return;
 
     clearTimeout(t);
     t = setTimeout(autoY, 60);
-  }});
+  });
 
-  function parseDate(v) {{
-    // Plotly manda string ISO ou ms
-    if (v === null || v === undefined) return null;
+  function parseDate(v) {
+    if (!v) return null;
     const d = new Date(v);
     if (!isNaN(d.getTime())) return d.getTime();
     return null;
-  }}
+  }
 
-  function getXRangeMs() {{
-    // tenta pegar o range atual do xaxis
+  function getXRangeMs() {
     const xr = gd.layout?.xaxis?.range;
-    if (xr && xr.length === 2) {{
+    if (xr && xr.length === 2) {
       const a = parseDate(xr[0]);
       const b = parseDate(xr[1]);
-      if (a !== null && b !== null) return [Math.min(a,b), Math.max(a,b)];
-    }}
-
-    // fallback: usa o domínio total (se não houver range)
+      if (a !== null && b !== null)
+        return [Math.min(a,b), Math.max(a,b)];
+    }
     return null;
-  }}
-
-  function autoY() {{
-    let xr = getXRangeMs();
-if (!xr) {
-  const rs = gd.layout?.xaxis?.rangeslider?.range;
-  if (rs && rs.length === 2) {
-    const a = parseDate(rs[0]);
-    const b = parseDate(rs[1]);
-    if (a !== null && b !== null) xr = [Math.min(a,b), Math.max(a,b)];
   }
-}
-if (!xr) {
-  Plotly.relayout(gd, {'yaxis.autorange': true});
-  return;
-}
 
-    const x0 = xr[0], x1 = xr[1];
+  function autoY() {
+
+    let xr = getXRangeMs();
+    if (!xr) {
+      Plotly.relayout(gd, {'yaxis.autorange': true});
+      return;
+    }
+
+    const x0 = xr[0];
+    const x1 = xr[1];
 
     let ymin = Infinity;
     let ymax = -Infinity;
 
-    // percorre traces
-    for (const tr of gd.data) {{
-      // ignora volume (geralmente y2)
+    for (const tr of gd.data) {
+
       if (tr.yaxis && tr.yaxis !== 'y') continue;
       if (tr.name && String(tr.name).toLowerCase().includes('volume')) continue;
 
       const xs = tr.x || [];
-      if (!xs || xs.length === 0) continue;
 
-      // Candlestick
-      if (tr.type === 'candlestick') {{
+      if (tr.type === 'candlestick') {
         const lows = tr.low || [];
         const highs = tr.high || [];
 
-        for (let i = 0; i < xs.length; i++) {{
+        for (let i = 0; i < xs.length; i++) {
           const xi = parseDate(xs[i]);
           if (xi === null) continue;
           if (xi < x0 || xi > x1) continue;
 
           const lo = Number(lows[i]);
           const hi = Number(highs[i]);
-          if (!isFinite(lo) || !isFinite(hi)) continue;
 
           if (lo < ymin) ymin = lo;
           if (hi > ymax) ymax = hi;
-        }}
-      }}
-      else {{
-        // Scatter/Lines etc (MAs, BB, etc)
+        }
+      }
+      else {
         const ys = tr.y || [];
-        for (let i = 0; i < xs.length; i++) {{
+
+        for (let i = 0; i < xs.length; i++) {
           const xi = parseDate(xs[i]);
           if (xi === null) continue;
           if (xi < x0 || xi > x1) continue;
@@ -551,30 +530,27 @@ if (!xr) {
 
           if (yi < ymin) ymin = yi;
           if (yi > ymax) ymax = yi;
-        }}
-      }}
-    }}
+        }
+      }
+    }
 
-    if (!isFinite(ymin) || !isFinite(ymax) || ymin === Infinity || ymax === -Infinity) {{
-      // se não achou nada, deixa autorange
-      Plotly.relayout(gd, {{ 'yaxis.autorange': true }});
+    if (!isFinite(ymin) || !isFinite(ymax)) {
+      Plotly.relayout(gd, {'yaxis.autorange': true});
       return;
-    }}
+    }
 
-    // padding (2.5%)
-    const pad = (ymax - ymin) * 0.025;
-    const y0 = ymin - pad;
-    const y1 = ymax + pad;
-
-    Plotly.relayout(gd, {{
+    const pad = (ymax - ymin) * 0.03;
+    Plotly.relayout(gd, {
       'yaxis.autorange': false,
-      'yaxis.range': [y0, y1]
-    }});
-  }}
-}})();
+      'yaxis.range': [ymin - pad, ymax + pad]
+    });
+  }
+
+})();
 </script>
 """
 
+    return html
 # ==============================
 # SIDEBAR
 # ==============================
@@ -852,6 +828,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
