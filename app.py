@@ -419,8 +419,8 @@ def apply_crosshair(fig):
     fig.update_layout(hovermode="x unified", spikedistance=-1)
     fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
                      spikethickness=1, spikecolor="rgba(255,255,255,0.35)")
-    fig.update_yaxes(showspikes=True, spikemode="across", spikesnap="cursor",
-                     spikethickness=1, spikecolor="rgba(255,255,255,0.25)")
+    fig.update_yaxes(fixedrange=False, row=1, col=1)  # preço
+    fig.update_yaxes(fixedrange=True, row=2, col=1)   # volume (opcional, pra não ficar “puxando”)
 
 # ==============================
 # PLOTLY AUTO-Y (igual Binance) via HTML+JS
@@ -812,7 +812,11 @@ for moeda in moedas:
                 add_range_buttons(fr)
                 if show_crosshair:
                     apply_crosshair(fr)
-                st.plotly_chart(fr, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
+                st.components.v1.html(
+                    plotly_autoy_html(fig, height=chart_height),
+                    height=chart_height + 30,
+                    scrolling=False
+                )
 
         # ======================
         # MACD (aba separada)
@@ -835,6 +839,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
