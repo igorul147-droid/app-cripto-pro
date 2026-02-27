@@ -511,7 +511,8 @@ for moeda in moedas:
                     decreasing_line_color="#FF4B4B",
                     increasing_fillcolor="rgba(0,200,150,0.88)",
                     decreasing_fillcolor="rgba(255,75,75,0.88)",
-                    whiskerwidth=0.7,
+                    whiskerwidth=0.5,
+                    opacity=1,
                     name="Preço",
                     hovertemplate=(
                         "<b>%{x|%d/%m/%Y %H:%M}</b><br>"
@@ -523,6 +524,11 @@ for moeda in moedas:
                 ),
                 row=1, col=1
             )
+            fig.add_vline(
+    x=df_view["timestamp"].iloc[-1],
+    line_dash="dot",
+    line_color="rgba(255,255,255,0.15)"
+)
 
             if show_price_line:
                 fig.add_hline(y=ultimo, line_dash="dot", opacity=0.55, row=1, col=1)
@@ -628,6 +634,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
