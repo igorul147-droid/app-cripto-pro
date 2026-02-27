@@ -1,15 +1,17 @@
 import time
 import streamlit as st
 import pandas as pd
+import numpy as np
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
-import requests
 
 # ==============================
 # PAGE
 # ==============================
 st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ - Premium")
+
 st.markdown(
     """
     <style>
@@ -38,34 +40,25 @@ st.markdown(
 st.title("🚀 Análise Cripto PRO+ — Premium")
 
 # ==============================
-# HELPERS / SETTINGS
+# SETTINGS / HELPERS
 # ==============================
 TZ_LOCAL = "America/Sao_Paulo"
 
-def fmt_price(moeda: str, p: float, meme_coins: set) -> str:
-    return f"${p:,.6f}" if moeda in meme_coins else f"${p:,.2f}"
+# meme set (ajusta casas decimais no preço)
+MEME_BASES = {"DOGE", "PEPE", "TURBO", "SHIB", "FLOKI", "BONK", "WIF", "BRETT", "MOG", "BOME"}
 
-def timeframe_freq(tf: str) -> str:
-    return {"1h": "1H", "4h": "4H", "1d": "1D"}.get(tf, "1D")
+def fmt_price(moeda: str, p: float) -> str:
+    base = moeda.split("/")[0]
+    return f"${p:,.6f}" if base in MEME_BASES else f"${p:,.2f}"
 
 def window_days_for_timeframe(tf: str) -> int:
-    # regra: 1h = 2 dias, 4h = 4 dias, 1d = 7 dias
     return {"1h": 2, "4h": 4, "1d": 7}.get(tf, 7)
 
 def limit_for_timeframe(tf: str) -> int:
-    # limites seguros pra APIs
     return {"1h": 800, "4h": 600, "1d": 400}.get(tf, 400)
 
 def symbol_compact(moeda: str) -> str:
-    # "BTC/USDT" -> "BTCUSDT"
     return moeda.replace("/", "")
-
-def apply_time_window(df: pd.DataFrame, window_days: int) -> pd.DataFrame:
-    if df.empty:
-        return df
-    end = df["timestamp"].max()
-    start = end - pd.Timedelta(days=window_days)
-    return df[df["timestamp"] >= start].copy()
 
 def ensure_timestamp_utc(series: pd.Series) -> pd.Series:
     s = series
@@ -77,12 +70,6 @@ def ensure_timestamp_utc(series: pd.Series) -> pd.Series:
         else:
             s = s.dt.tz_convert("UTC")
     return s
-
-def to_local_naive(df: pd.DataFrame) -> pd.DataFrame:
-    # converte pra horário do Brasil e deixa "naive" pro Plotly renderizar bonito
-    d = df.copy()
-    d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
-    return d
 
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -97,34 +84,27 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     d["volume"] = d["volume"].fillna(0.0)
     return d
 
-def resample_to_ohlcv(df_close_vol: pd.DataFrame, tf: str) -> pd.DataFrame:
-    """
-    Fallback CoinGecko "Binance-like":
-    pega close+volume e resample em OHLCV REAL no timeframe (1h/4h/1d).
-    """
-    d = df_close_vol.copy()
-    d["timestamp"] = ensure_timestamp_utc(d["timestamp"])
-    d = d.sort_values("timestamp").dropna(subset=["close"]).reset_index(drop=True)
-    d = d.set_index("timestamp")
+def to_local_naive(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
+    return d
 
-    freq = timeframe_freq(tf)  # "1H" / "4H" / "1D"
-    ohlc = d["close"].resample(freq).ohlc()
-    vol = d["volume"].resample(freq).sum().rename("volume")
-
-    out = pd.concat([ohlc, vol], axis=1).dropna(subset=["open", "high", "low", "close"])
-    out = out.reset_index()
-    out.columns = ["timestamp", "open", "high", "low", "close", "volume"]
-    return normalize_ohlcv(out)
+def apply_time_window(df: pd.DataFrame, window_days: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+    end = df["timestamp"].max()
+    start = end - pd.Timedelta(days=window_days)
+    return df[df["timestamp"] >= start].copy()
 
 def add_range_buttons(fig):
     fig.update_xaxes(
         rangeselector=dict(
             buttons=list([
                 dict(count=12, label="12H", step="hour", stepmode="backward"),
-                dict(count=1, label="1D", step="day", stepmode="backward"),
-                dict(count=2, label="2D", step="day", stepmode="backward"),
-                dict(count=4, label="4D", step="day", stepmode="backward"),
-                dict(count=7, label="1W", step="day", stepmode="backward"),
+                dict(count=1,  label="1D",  step="day",  stepmode="backward"),
+                dict(count=2,  label="2D",  step="day",  stepmode="backward"),
+                dict(count=4,  label="4D",  step="day",  stepmode="backward"),
+                dict(count=7,  label="1W",  step="day",  stepmode="backward"),
                 dict(step="all", label="ALL"),
             ])
         )
@@ -154,7 +134,7 @@ def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 
         try:
             r = requests.get(url, params=params, headers=headers, timeout=25)
             if r.status_code in (418, 429) or 500 <= r.status_code <= 599:
-                last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:250]}")
+                last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
                 time.sleep(base_sleep * (i + 1))
                 continue
             r.raise_for_status()
@@ -165,12 +145,13 @@ def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 
     raise last_err
 
 # ==============================
-# BINANCE PAIRS (ALL USDT SPOT) - ROBUST
+# BINANCE PAIRS (USDT SPOT) - SEM FDUSD/USDC
 # ==============================
 @st.cache_data(ttl=60 * 60)
 def fetch_binance_usdt_spot_pairs() -> list[str]:
     """
     Pega TODAS as moedas USDT Spot da Binance com fallback de endpoints.
+    Exclui baseAsset FDUSD e USDC (como você pediu).
     Se falhar, retorna lista mínima e NÃO derruba o app.
     """
     endpoints = [
@@ -180,8 +161,8 @@ def fetch_binance_usdt_spot_pairs() -> list[str]:
         "https://api3.binance.com/api/v3/exchangeInfo",
         "https://data-api.binance.vision/api/v3/exchangeInfo",
     ]
-
     last_err = None
+
     for url in endpoints:
         try:
             j = request_json(url, params={}, attempts=2, base_sleep=0.6)
@@ -194,10 +175,13 @@ def fetch_binance_usdt_spot_pairs() -> list[str]:
                     continue
                 if s.get("quoteAsset") != "USDT":
                     continue
+
                 base = s.get("baseAsset")
-                quote = s.get("quoteAsset")
-                if base and quote:
-                    out.append(f"{base}/{quote}")
+                if base in {"FDUSD", "USDC"}:
+                    continue
+
+                if base:
+                    out.append(f"{base}/USDT")
 
             out = sorted(list(dict.fromkeys(out)))
             if out:
@@ -208,12 +192,12 @@ def fetch_binance_usdt_spot_pairs() -> list[str]:
     st.session_state["binance_pairs_error"] = str(last_err) if last_err else "Falha desconhecida"
     return [
         "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
-        "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "MATIC/USDT",
+        "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "TRX/USDT",
         "PEPE/USDT", "SHIB/USDT", "TURBO/USDT"
     ]
 
 # ==============================
-# DATA SOURCES
+# DATA SOURCES (Bybit / Binance / CoinGecko OHLC)
 # ==============================
 @st.cache_data(ttl=180)
 def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
@@ -237,6 +221,7 @@ def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
 @st.cache_data(ttl=180)
 def fetch_binance_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
     interval_map = {"1h": "1h", "4h": "4h", "1d": "1d"}
+
     endpoints = [
         "https://api.binance.com/api/v3/klines",
         "https://api1.binance.com/api/v3/klines",
@@ -249,7 +234,7 @@ def fetch_binance_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame
     for url in endpoints:
         try:
             params = {"symbol": symbol, "interval": interval_map[timeframe], "limit": str(limit)}
-            j = request_json(url, params)
+            j = request_json(url, params=params, attempts=2, base_sleep=0.6)
             df = pd.DataFrame(j, columns=[
                 "timestamp", "open", "high", "low", "close", "volume",
                 "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore"
@@ -260,7 +245,7 @@ def fetch_binance_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame
         except Exception as e:
             last_err = e
 
-    raise last_err
+    raise last_err if last_err else RuntimeError("Binance klines falhou")
 
 @st.cache_data(ttl=600)
 def coingecko_resolve_id(query: str) -> str:
@@ -272,31 +257,39 @@ def coingecko_resolve_id(query: str) -> str:
     return coins[0]["id"]
 
 @st.cache_data(ttl=300)
-def fetch_coingecko_prices_and_volumes(coin_id: str, days: int) -> pd.DataFrame:
+def fetch_coingecko_ohlc_with_volume(coin_id: str, days: int) -> pd.DataFrame:
     """
-    Puxa close + volume no CoinGecko e devolve timestamp(UTC), close, volume.
-    Depois resampleamos em OHLCV real pro timeframe desejado.
+    CoinGecko OHLC (candles reais) + volume do market_chart.
+    Output: timestamp(UTC), open, high, low, close, volume
     """
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-    j = request_json(url, {"vs_currency": "usd", "days": days})
+    # OHLC
+    url_ohlc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    j_ohlc = request_json(url_ohlc, {"vs_currency": "usd", "days": days}, attempts=3, base_sleep=0.8)
+    df_ohlc = pd.DataFrame(j_ohlc, columns=["timestamp", "open", "high", "low", "close"])
+    df_ohlc["timestamp"] = pd.to_datetime(pd.to_numeric(df_ohlc["timestamp"]), unit="ms", utc=True)
 
-    prices = pd.DataFrame(j["prices"], columns=["timestamp", "close"])
-    prices["timestamp"] = pd.to_datetime(pd.to_numeric(prices["timestamp"]), unit="ms", utc=True)
+    # Volume
+    url_mc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    j_mc = request_json(url_mc, {"vs_currency": "usd", "days": days}, attempts=3, base_sleep=0.8)
+    df_vol = pd.DataFrame(j_mc.get("total_volumes", []), columns=["timestamp", "volume"])
 
-    volumes = pd.DataFrame(j["total_volumes"], columns=["timestamp", "volume"])
-    volumes["timestamp"] = pd.to_datetime(pd.to_numeric(volumes["timestamp"]), unit="ms", utc=True)
+    if not df_vol.empty:
+        df_vol["timestamp"] = pd.to_datetime(pd.to_numeric(df_vol["timestamp"]), unit="ms", utc=True)
+        df_vol["volume"] = pd.to_numeric(df_vol["volume"], errors="coerce").fillna(0.0)
 
-    df = pd.merge_asof(
-        prices.sort_values("timestamp"),
-        volumes.sort_values("timestamp"),
-        on="timestamp",
-        direction="nearest",
-        tolerance=pd.Timedelta("30min")
-    )
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df = df.dropna(subset=["close"]).reset_index(drop=True)
-    return df
+        df_ohlc = pd.merge_asof(
+            df_ohlc.sort_values("timestamp"),
+            df_vol.sort_values("timestamp"),
+            on="timestamp",
+            direction="nearest",
+            tolerance=pd.Timedelta("2H"),
+        )
+        df_ohlc["volume"] = df_ohlc["volume"].fillna(0.0)
+    else:
+        df_ohlc["volume"] = 0.0
+
+    df_ohlc = df_ohlc[["timestamp", "open", "high", "low", "close", "volume"]]
+    return normalize_ohlcv(df_ohlc)
 
 def build_dataset_hybrid(moeda: str, timeframe: str):
     sym = symbol_compact(moeda)   # BTCUSDT
@@ -306,34 +299,34 @@ def build_dataset_hybrid(moeda: str, timeframe: str):
 
     errors = {}
 
-    # 1) Binance (sempre primeiro -> "igual Binance" mesmo)
-    try:
-        df = fetch_binance_ohlcv(sym, timeframe, limit)
-        return df, "Binance (spot)", window_days, errors
-    except Exception as e:
-        errors["Binance"] = str(e)[:260]
-
-    # 2) Bybit
+    # 1) Bybit
     try:
         df = fetch_bybit_ohlcv(sym, timeframe, limit)
         return df, "Bybit (spot)", window_days, errors
     except Exception as e:
         errors["Bybit"] = str(e)[:260]
 
-    # 3) CoinGecko (fallback bom: market_chart + resample em 1h/4h/1d)
+    # 2) Binance
     try:
+        df = fetch_binance_ohlcv(sym, timeframe, limit)
+        return df, "Binance (spot)", window_days, errors
+    except Exception as e:
+        errors["Binance"] = str(e)[:260]
+
+    # 3) CoinGecko OHLC (fallback)
+    try:
+        # CoinGecko OHLC aceita days: 1, 7, 14, 30, 90, 180, 365, max
         if timeframe == "1h":
-            days_fetch = 5
+            days_fetch = 7     # dá candles melhores e cobre sua janela 2d
         elif timeframe == "4h":
-            days_fetch = 12
+            days_fetch = 14    # costuma ficar mais próximo de 4h
         else:
-            days_fetch = 30
+            days_fetch = 30    # 1d
 
         cg_id = coingecko_resolve_id(base)
-        raw = fetch_coingecko_prices_and_volumes(cg_id, days_fetch)
-        df = resample_to_ohlcv(raw, timeframe)
+        df = fetch_coingecko_ohlc_with_volume(cg_id, days_fetch)
+        return df, "CoinGecko OHLC (fallback)", window_days, errors
 
-        return df, "CoinGecko (fallback resample)", window_days, errors
     except Exception as e:
         errors["CoinGecko"] = str(e)[:260]
 
@@ -419,7 +412,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 # ==============================
-# COINS (FULL BINANCE USDT SPOT)
+# COINS (FULL BINANCE USDT SPOT) + SEARCH (SEM QUEBRAR)
 # ==============================
 ALL_USDT = fetch_binance_usdt_spot_pairs()
 
@@ -431,26 +424,33 @@ if "binance_pairs_error" in st.session_state:
     if st.sidebar.toggle("🧪 Debug lista Binance", value=False):
         st.sidebar.code(st.session_state["binance_pairs_error"])
 
-# meme coin (só pra formatação e aviso)
-MEME_BASES = {"DOGE", "PEPE", "TURBO", "SHIB", "FLOKI", "BONK", "WIF"}
-meme_coins = {m for m in ALL_USDT if m.split("/")[0] in MEME_BASES}
-
-# busca pra não travar com milhares de pares
+# Busca (ex: TURBO, PEPE, SOL)
 search = st.text_input("Buscar moeda (ex: BTC, PEPE, SOL):", value="").strip().upper()
+
+# filtra lista por base
 if search:
-    filtered = [m for m in ALL_USDT if search in m.replace("/", "")]
+    filtered = [m for m in ALL_USDT if m.startswith(search + "/")]
 else:
     filtered = ALL_USDT
 
+# mantém seleção mesmo se filtro não incluir (pra não quebrar)
+default_pick = ["BTC/USDT"] if "BTC/USDT" in ALL_USDT else ([ALL_USDT[0]] if ALL_USDT else [])
+prev_selected = st.session_state.get("selected_pairs", default_pick)
+
+# options = filtradas + selecionadas (garante sempre existir)
+options = list(dict.fromkeys(filtered + list(prev_selected)))
+
 moedas = st.multiselect(
     "Escolha até 3 criptos:",
-    filtered,
-    default=["BTC/USDT"] if "BTC/USDT" in ALL_USDT else ([ALL_USDT[0]] if ALL_USDT else []),
-    max_selections=3
+    options,
+    default=[m for m in prev_selected if m in options][:3] or ([options[0]] if options else []),
+    max_selections=3,
 )
 
+st.session_state["selected_pairs"] = moedas
+
 # ==============================
-# TABS (RSI/MACD separados como você curtiu)
+# TABS
 # ==============================
 tab_chart, tab_rsi, tab_macd = st.tabs(["📈 Gráfico", "📉 RSI", "📊 MACD"])
 
@@ -459,7 +459,8 @@ tab_chart, tab_rsi, tab_macd = st.tabs(["📈 Gráfico", "📉 RSI", "📊 MACD"
 # ==============================
 for moeda in moedas:
     with st.expander(f"Detalhes de {moeda}", expanded=True):
-        if moeda in meme_coins:
+        base = moeda.split("/")[0]
+        if base in MEME_BASES:
             st.warning("🧪 Meme coin — alta volatilidade")
 
         try:
@@ -478,17 +479,17 @@ for moeda in moedas:
                     st.code(f"{k}: {v}", language="text")
             continue
 
-        # janela fixa (2d/4d/7d)
+        # janela fixa
         df_view_utc = apply_time_window(df_full_utc, window_days)
         if df_view_utc.empty or len(df_view_utc) < 10:
-            st.warning("Poucos dados para renderizar. Tente outro prazo.")
+            st.warning("Poucos dados para renderizar. Tente outro timeframe.")
             st.caption(f"Fonte: {source}")
             continue
 
         # indicadores (em UTC)
         df_view_utc = add_indicators(df_view_utc)
 
-        # converte pra Brasil só pra plot/tooltip
+        # converte só pro Plot/tooltip (hora BR)
         df_view = to_local_naive(df_view_utc)
 
         ultimo = float(df_view_utc["close"].iloc[-1])
@@ -504,9 +505,9 @@ for moeda in moedas:
         )
 
         k1, k2, k3 = st.columns([1.6, 1, 1])
-        k1.metric(f"💰 Preço atual {moeda}", fmt_price(moeda, ultimo, meme_coins), f"{var_pct:.2f}%")
-        k2.metric("📈 Máxima (janela)", fmt_price(moeda, float(df_view_utc["high"].max()), meme_coins))
-        k3.metric("📉 Mínima (janela)", fmt_price(moeda, float(df_view_utc["low"].min()), meme_coins))
+        k1.metric(f"💰 Preço atual {moeda}", fmt_price(moeda, ultimo), f"{var_pct:.2f}%")
+        k2.metric("📈 Máxima (janela)", fmt_price(moeda, float(df_view_utc["high"].max())))
+        k3.metric("📉 Mínima (janela)", fmt_price(moeda, float(df_view_utc["low"].min())))
 
         # ======================
         # CHART
@@ -519,15 +520,16 @@ for moeda in moedas:
                 row_titles=["Preço", "Volume"]
             )
 
+            # Candles estilo Binance (mais fortes)
             fig.add_trace(
                 go.Candlestick(
                     x=df_view["timestamp"],
                     open=df_view["open"], high=df_view["high"], low=df_view["low"], close=df_view["close"],
                     increasing_line_color="#00C896",
                     decreasing_line_color="#FF4B4B",
-                    increasing_fillcolor="rgba(0,200,150,0.88)",
-                    decreasing_fillcolor="rgba(255,75,75,0.88)",
-                    whiskerwidth=0.7,
+                    increasing_fillcolor="rgba(0,200,150,0.92)",
+                    decreasing_fillcolor="rgba(255,75,75,0.92)",
+                    whiskerwidth=0.8,
                     name="Preço",
                     hovertemplate=(
                         "<b>%{x|%d/%m/%Y %H:%M}</b><br>"
@@ -545,14 +547,14 @@ for moeda in moedas:
 
             # MAs
             if show_ma and "MA7" in df_view.columns:
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA7"], mode="lines", opacity=0.9, name="MA7"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA7"],  mode="lines", opacity=0.9, name="MA7"),  row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA25"], mode="lines", opacity=0.9, name="MA25"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["MA99"], mode="lines", opacity=0.9, name="MA99"), row=1, col=1)
 
             # BB
             if show_bb and "BB_UP" in df_view.columns:
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_UP"], mode="lines", opacity=0.55, name="BB Upper"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_MID"], mode="lines", opacity=0.55, name="BB Mid"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_UP"],  mode="lines", opacity=0.55, name="BB Upper"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_MID"], mode="lines", opacity=0.55, name="BB Mid"),   row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_view["timestamp"], y=df_view["BB_LOW"], mode="lines", opacity=0.55, name="BB Lower"), row=1, col=1)
 
             # Volume
@@ -644,6 +646,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
