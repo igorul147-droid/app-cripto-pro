@@ -1,8 +1,9 @@
 import time
 import json
 import requests
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
@@ -10,12 +11,18 @@ from streamlit_autorefresh import st_autorefresh
 # ==============================
 # PAGE
 # ==============================
-st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ - Premium")
+st.set_page_config(layout="wide", page_title="Análise Cripto PRO+")
 st.markdown(
     """
     <style>
       .block-container {padding-top: 1.1rem;}
       div[data-testid="stSidebar"] {border-right: 1px solid rgba(255,255,255,0.06);}
+      .stMetric {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.06);
+        padding: 14px;
+        border-radius: 14px;
+      }
       .small-note {opacity: .75; font-size: 0.9rem;}
       .badge {
         display:inline-block; padding:6px 10px; border-radius:999px;
@@ -29,125 +36,380 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-st.title("🚀 Análise Cripto PRO+ — Premium")
+st.title("🚀 Análise Cripto PRO+")
 
 # ==============================
-# HELPERS
+# SETTINGS
 # ==============================
 TZ_LOCAL = "America/Sao_Paulo"
 
-def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 0.6):
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    last = None
+# ==============================
+# NETWORK (RETRY)
+# ==============================
+def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 0.7):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (StreamlitApp)",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    last_err = None
     for i in range(attempts):
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=20)
+            r = requests.get(url, params=params, headers=headers, timeout=25)
             if r.status_code in (418, 429) or 500 <= r.status_code <= 599:
-                last = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+                last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:250]}")
                 time.sleep(base_sleep * (i + 1))
                 continue
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            last = e
+            last_err = e
             time.sleep(base_sleep * (i + 1))
-    raise last
+    raise last_err
+
+# ==============================
+# TIME HELPERS
+# ==============================
+def ensure_timestamp_utc(series: pd.Series) -> pd.Series:
+    s = series
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        s = pd.to_datetime(s, utc=True, errors="coerce")
+    else:
+        if getattr(s.dt, "tz", None) is None:
+            s = s.dt.tz_localize("UTC")
+        else:
+            s = s.dt.tz_convert("UTC")
+    return s
+
+def to_local_naive(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
+    return d
+
+# ==============================
+# CORE HELPERS
+# ==============================
+def fmt_price(moeda: str, p: float, meme_coins: set[str]) -> str:
+    return f"${p:,.6f}" if moeda in meme_coins else f"${p:,.2f}"
 
 def symbol_compact(moeda: str) -> str:
     return moeda.replace("/", "")
 
-def fmt_price(p: float) -> str:
-    return f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
-
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-    d["timestamp"] = pd.to_datetime(d["timestamp"], unit="ms", utc=True)
-    for c in ["open","high","low","close","volume"]:
-        d[c] = pd.to_numeric(d[c], errors="coerce")
-    d = d.dropna(subset=["open","high","low","close"]).sort_values("timestamp").reset_index(drop=True)
+    d["timestamp"] = ensure_timestamp_utc(d["timestamp"])
+    d = d.sort_values("timestamp").reset_index(drop=True)
+    for c in ["open", "high", "low", "close", "volume"]:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+    if "volume" not in d.columns:
+        d["volume"] = 0.0
     d["volume"] = d["volume"].fillna(0.0)
     return d
 
-def to_local_naive(df_utc: pd.DataFrame) -> pd.DataFrame:
-    d = df_utc.copy()
-    d["timestamp"] = d["timestamp"].dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
-    return d
+def apply_time_window(df: pd.DataFrame, window_days: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+    end = df["timestamp"].max()
+    start = end - pd.Timedelta(days=window_days)
+    return df[df["timestamp"] >= start].copy()
 
 def window_days_for_timeframe(tf: str) -> int:
     return {"1h": 2, "4h": 4, "1d": 7}.get(tf, 7)
 
-def limit_for_timeframe(tf: str) -> int:
-    # Binance max 1000
-    return 1000
+def timeframe_freq(tf: str) -> str:
+    return {"1h": "1H", "4h": "4H", "1d": "1D"}.get(tf, "1D")
 
 # ==============================
-# BINANCE PAIRS (USDT only) - sem FDUSD e USDC
+# BINANCE: FULL USDT SPOT PAIRS (SEM FDUSD E USDC)
 # ==============================
 @st.cache_data(ttl=60 * 60)
 def fetch_binance_usdt_spot_pairs() -> list[str]:
+    """
+    Lista de pares USDT Spot (TRADING + spot allowed).
+    Sem FDUSD e USDC (por pedido).
+    """
     endpoints = [
         "https://api.binance.com/api/v3/exchangeInfo",
         "https://data-api.binance.vision/api/v3/exchangeInfo",
         "https://api1.binance.com/api/v3/exchangeInfo",
         "https://api2.binance.com/api/v3/exchangeInfo",
+        "https://api3.binance.com/api/v3/exchangeInfo",
     ]
+
     last_err = None
     for url in endpoints:
         try:
-            j = request_json(url, {}, attempts=2, base_sleep=0.6)
+            j = request_json(url, params={}, attempts=2, base_sleep=0.6)
+            symbols = j.get("symbols", [])
             out = []
-            for s in j.get("symbols", []):
+            for s in symbols:
                 if s.get("status") != "TRADING":
                     continue
                 if s.get("isSpotTradingAllowed") is not True:
                     continue
-                if s.get("quoteAsset") != "USDT":
-                    continue
+
+                quote = s.get("quoteAsset")
                 base = s.get("baseAsset")
-                if not base:
+                if quote != "USDT":
                     continue
-                out.append(f"{base}/USDT")
+
+                # Só por segurança — aqui não deve aparecer FDUSD/USDC pq é quote USDT
+                if quote in ("FDUSD", "USDC"):
+                    continue
+
+                if base and quote:
+                    out.append(f"{base}/{quote}")
+
             out = sorted(list(dict.fromkeys(out)))
-            return out
+            if out:
+                return out
         except Exception as e:
             last_err = e
 
     st.session_state["binance_pairs_error"] = str(last_err) if last_err else "Falha desconhecida"
-    return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT", "PEPE/USDT", "TURBO/USDT"]
+    # fallback mínimo
+    return ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT", "PEPE/USDT", "TURBO/USDT"]
 
 # ==============================
-# DATA (Binance OHLC)
+# BINANCE: OHLCV (PAGINADO) p/ HISTÓRICO MAIOR
 # ==============================
-@st.cache_data(ttl=120)
-def fetch_binance_ohlcv(symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
-    interval_map = {"1h": "1h", "4h": "4h", "1d": "1d"}
+def _binance_klines(symbol: str, interval: str, limit: int = 1000, endTime: int | None = None):
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval_map[timeframe], "limit": str(limit)}
-    j = request_json(url, params)
-    df = pd.DataFrame(j, columns=[
-        "timestamp","open","high","low","close","volume",
-        "closeTime","qav","numTrades","tbbav","tbqav","ignore"
+    params = {"symbol": symbol, "interval": interval, "limit": str(limit)}
+    if endTime is not None:
+        params["endTime"] = str(endTime)
+    return request_json(url, params=params, attempts=3, base_sleep=0.7)
+
+@st.cache_data(ttl=180)
+def fetch_binance_ohlcv_paged(symbol: str, timeframe: str, candles_target: int = 4000) -> pd.DataFrame:
+    """
+    Binance permite até 1000 por request.
+    Aqui buscamos até candles_target (ex: 4000) paginando pelo endTime.
+    Isso te dá muito mais histórico pra arrastar pro passado mantendo candle bonito.
+    """
+    interval_map = {"1h": "1h", "4h": "4h", "1d": "1d"}
+    interval = interval_map[timeframe]
+
+    all_rows = []
+    end_time = None  # ms
+    remaining = int(candles_target)
+
+    # evita loop infinito
+    max_pages = int(np.ceil(candles_target / 1000)) + 3
+
+    for _ in range(max_pages):
+        batch_limit = 1000 if remaining > 1000 else max(200, remaining)
+        j = _binance_klines(symbol, interval, limit=batch_limit, endTime=end_time)
+        if not j:
+            break
+
+        # j é lista de listas
+        # [ open_time, open, high, low, close, volume, close_time, ...]
+        all_rows.extend(j)
+
+        # próximo page: pega antes do primeiro candle desse lote
+        first_open_time = int(j[0][0])
+        end_time = first_open_time - 1
+
+        remaining -= len(j)
+        if remaining <= 0:
+            break
+
+        # se veio menos que pediu, acabou histórico
+        if len(j) < batch_limit:
+            break
+
+        # respiro curto (evita 429)
+        time.sleep(0.05)
+
+    df = pd.DataFrame(all_rows, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore"
     ])
-    df = df[["timestamp","open","high","low","close","volume"]]
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+    df = normalize_ohlcv(df)
+    return df
+
+# ==============================
+# BYBIT (1º prioridade no híbrido)
+# ==============================
+@st.cache_data(ttl=180)
+def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    interval_map = {"1h": "60", "4h": "240", "1d": "D"}
+    url = "https://api.bybit.com/v5/market/kline"
+    params = {
+        "category": "spot",
+        "symbol": symbol,
+        "interval": interval_map[timeframe],
+        "limit": str(limit),
+    }
+    j = request_json(url, params)
+    if str(j.get("retCode")) != "0":
+        raise RuntimeError(f"Bybit retCode={j.get('retCode')} msg={j.get('retMsg')}")
+    rows = j["result"]["list"]
+    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
+    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
     return normalize_ohlcv(df)
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+# ==============================
+# COINGECKO (fallback final) — OHLC endpoint
+# ==============================
+@st.cache_data(ttl=600)
+def coingecko_resolve_id(query: str) -> str:
+    url = "https://api.coingecko.com/api/v3/search"
+    j = request_json(url, {"query": query}, attempts=2, base_sleep=0.6)
+    coins = j.get("coins", [])
+    if not coins:
+        raise RuntimeError("CoinGecko search vazio")
+    return coins[0]["id"]
+
+@st.cache_data(ttl=300)
+def fetch_coingecko_ohlc(coin_id: str, days: int) -> pd.DataFrame:
+    # OHLC
+    url_ohlc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    j_ohlc = request_json(url_ohlc, {"vs_currency": "usd", "days": days})
+
+    df_ohlc = pd.DataFrame(j_ohlc, columns=["timestamp", "open", "high", "low", "close"])
+    df_ohlc["timestamp"] = pd.to_datetime(pd.to_numeric(df_ohlc["timestamp"]), unit="ms", utc=True)
+
+    # volume via market_chart
+    url_mc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    j_mc = request_json(url_mc, {"vs_currency": "usd", "days": days})
+
+    df_vol = pd.DataFrame(j_mc.get("total_volumes", []), columns=["timestamp", "volume"])
+    if not df_vol.empty:
+        df_vol["timestamp"] = pd.to_datetime(pd.to_numeric(df_vol["timestamp"]), unit="ms", utc=True)
+        df_vol["volume"] = pd.to_numeric(df_vol["volume"], errors="coerce").fillna(0.0)
+        df_ohlc = pd.merge_asof(
+            df_ohlc.sort_values("timestamp"),
+            df_vol.sort_values("timestamp"),
+            on="timestamp",
+            direction="nearest",
+            tolerance=pd.Timedelta("2H"),
+        )
+        df_ohlc["volume"] = df_ohlc["volume"].fillna(0.0)
+    else:
+        df_ohlc["volume"] = 0.0
+
+    df_ohlc = df_ohlc[["timestamp", "open", "high", "low", "close", "volume"]]
+    return normalize_ohlcv(df_ohlc)
+
+# ==============================
+# DATASET HYBRID
+# ==============================
+def build_dataset_hybrid(moeda: str, timeframe: str, candles_target: int):
+    sym = symbol_compact(moeda)   # BTCUSDT
+    base = moeda.split("/")[0]    # BTC
+    window_days = window_days_for_timeframe(timeframe)
+
+    errors = {}
+
+    # 1) Bybit (rápido)
+    try:
+        # bybit limit máximo comum é 1000
+        bybit_limit = min(1000, max(300, candles_target))
+        df = fetch_bybit_ohlcv(sym, timeframe, bybit_limit)
+        return df, "Bybit (spot)", window_days, errors
+    except Exception as e:
+        errors["Bybit"] = str(e)[:260]
+
+    # 2) Binance (histórico grande com paginação)
+    try:
+        df = fetch_binance_ohlcv_paged(sym, timeframe, candles_target=candles_target)
+        return df, "Binance (spot)", window_days, errors
+    except Exception as e:
+        errors["Binance"] = str(e)[:260]
+
+    # 3) CoinGecko OHLC (fallback)
+    try:
+        if timeframe == "1h":
+            days_fetch = 7
+        elif timeframe == "4h":
+            days_fetch = 14
+        else:
+            days_fetch = 30
+
+        cg_id = coingecko_resolve_id(base)
+        df = fetch_coingecko_ohlc(cg_id, days_fetch)
+        return df, "CoinGecko OHLC (fallback)", window_days, errors
+    except Exception as e:
+        errors["CoinGecko"] = str(e)[:260]
+
+    raise RuntimeError("Falha geral de dados", errors)
+
+# ==============================
+# INDICATORS
+# ==============================
+def add_indicators(df: pd.DataFrame, show_ma: bool, show_bb: bool, show_rsi: bool, show_macd: bool, show_vol_ma: bool, vol_ma_period: int) -> pd.DataFrame:
     d = df.copy()
-    d["MA7"] = d["close"].rolling(7).mean()
-    d["MA25"] = d["close"].rolling(25).mean()
-    d["MA99"] = d["close"].rolling(99).mean()
-    d["VOL_MA"] = d["volume"].rolling(20).mean()
+
+    if show_ma:
+        d["MA7"] = d["close"].rolling(7).mean()
+        d["MA25"] = d["close"].rolling(25).mean()
+        d["MA99"] = d["close"].rolling(99).mean()
+
+    if show_bb:
+        mid = d["close"].rolling(20).mean()
+        std = d["close"].rolling(20).std()
+        d["BB_MID"] = mid
+        d["BB_UP"] = mid + 2 * std
+        d["BB_LOW"] = mid - 2 * std
+
+    if show_rsi:
+        delta = d["close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        d["RSI"] = 100 - (100 / (1 + rs))
+
+    if show_macd:
+        ema12 = d["close"].ewm(span=12, adjust=False).mean()
+        ema26 = d["close"].ewm(span=26, adjust=False).mean()
+        d["MACD"] = ema12 - ema26
+        d["SIGNAL"] = d["MACD"].ewm(span=9, adjust=False).mean()
+        d["HIST"] = d["MACD"] - d["SIGNAL"]
+
+    if show_vol_ma:
+        d["VOL_MA"] = d["volume"].rolling(vol_ma_period).mean()
+
     return d
 
 # ==============================
-# PLOTLY AUTO-Y (Binance style) via HTML + JS
+# UI HELPERS
 # ==============================
-def plotly_autoy_html(fig: go.Figure, height: int = 850) -> str:
+def add_range_buttons(fig):
+    fig.update_xaxes(
+        rangeselector=dict(
+            buttons=list([
+                dict(count=12, label="12H", step="hour", stepmode="backward"),
+                dict(count=1, label="1D", step="day", stepmode="backward"),
+                dict(count=2, label="2D", step="day", stepmode="backward"),
+                dict(count=4, label="4D", step="day", stepmode="backward"),
+                dict(count=7, label="1W", step="day", stepmode="backward"),
+                dict(step="all", label="ALL"),
+            ])
+        )
+    )
+
+def apply_crosshair(fig):
+    fig.update_layout(hovermode="x unified", spikedistance=-1)
+    fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
+                     spikethickness=1, spikecolor="rgba(255,255,255,0.35)")
+    fig.update_yaxes(showspikes=True, spikemode="across", spikesnap="cursor",
+                     spikethickness=1, spikecolor="rgba(255,255,255,0.25)")
+
+# ==============================
+# PLOTLY AUTO-Y (igual Binance) via HTML+JS
+# ==============================
+def plotly_autoy_html(fig: go.Figure, height: int = 860) -> str:
     fig_dict = fig.to_plotly_json()
     payload = json.dumps(fig_dict)
 
-    # JS: ao mudar x-range (pan/zoom/rangeslider), recalcula y-range pelo low/high visíveis
     return f"""
     <div id="chart" style="width:100%;height:{height}px;"></div>
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
@@ -163,49 +425,38 @@ def plotly_autoy_html(fig: go.Figure, height: int = 850) -> str:
       }};
 
       function parseTime(t) {{
-        // t pode vir como ISO string
         return new Date(t).getTime();
       }}
 
       function calcYRangeFromXRange(x0, x1) {{
         const data = fig.data || [];
-        // assume 1º trace candlestick
         const cs = data.find(tr => tr.type === 'candlestick') || data[0];
         if (!cs || !cs.x || !cs.low || !cs.high) return null;
 
-        const xs = cs.x;
-        const lows = cs.low;
-        const highs = cs.high;
+        const xs = cs.x, lows = cs.low, highs = cs.high;
+        const start = parseTime(x0), end = parseTime(x1);
 
-        const start = parseTime(x0);
-        const end = parseTime(x1);
-
-        let lo = Infinity;
-        let hi = -Infinity;
+        let lo = Infinity, hi = -Infinity;
 
         for (let i = 0; i < xs.length; i++) {{
           const xt = parseTime(xs[i]);
           if (xt >= start && xt <= end) {{
-            const l = lows[i];
-            const h = highs[i];
+            const l = lows[i], h = highs[i];
             if (l < lo) lo = l;
             if (h > hi) hi = h;
           }}
         }}
 
         if (!isFinite(lo) || !isFinite(hi)) return null;
-
-        const pad = (hi - lo) * 0.02; // 2% padding (estilo Binance)
+        const pad = (hi - lo) * 0.02; // 2%
         return [lo - pad, hi + pad];
       }}
 
-      function applyAutoYFromLayout(layout) {{
-        const xr = (layout.xaxis && layout.xaxis.range) ? layout.xaxis.range : null;
+      function applyAutoY() {{
+        const xr = (gd.layout && gd.layout.xaxis && gd.layout.xaxis.range) ? gd.layout.xaxis.range : null;
         if (!xr || xr.length < 2) return;
-
         const yr = calcYRangeFromXRange(xr[0], xr[1]);
         if (!yr) return;
-
         Plotly.relayout(gd, {{
           'yaxis.range': yr,
           'yaxis.autorange': false
@@ -213,15 +464,11 @@ def plotly_autoy_html(fig: go.Figure, height: int = 850) -> str:
       }}
 
       Plotly.newPlot(gd, fig.data, fig.layout, config).then(() => {{
-        // AutoY inicial (se já tem range)
-        applyAutoYFromLayout(fig.layout);
-
+        applyAutoY();
         gd.on('plotly_relayout', (e) => {{
-          // pega range do x vindo do evento
           let x0 = e['xaxis.range[0]'];
           let x1 = e['xaxis.range[1]'];
 
-          // se deu reset autoscale no x
           if (!x0 || !x1) {{
             const current = gd.layout && gd.layout.xaxis && gd.layout.xaxis.range;
             if (current && current.length === 2) {{
@@ -245,26 +492,61 @@ def plotly_autoy_html(fig: go.Figure, height: int = 850) -> str:
     """
 
 # ==============================
-# SIDEBAR (CONTROLES)
+# SIDEBAR
 # ==============================
 with st.sidebar:
     st.header("⚙️ Controles")
+
     auto_refresh = st.toggle("🔄 Atualização automática", value=False)
-    refresh_seconds = st.select_slider("Intervalo (segundos)", options=[30, 60, 120, 180], value=60)
+    refresh_seconds = st.select_slider("Intervalo (segundos)", options=[30, 60, 120, 180, 300], value=60)
     if auto_refresh:
         st_autorefresh(interval=refresh_seconds * 1000, key="refresh")
+
+    if st.button("🔁 Atualizar agora"):
+        st.rerun()
 
     st.divider()
     timeframe = st.selectbox("Prazo:", ["1h", "4h", "1d"], index=0)
 
+    st.divider()
+    st.subheader("🕰️ Histórico (candles)")
+    candles_target = st.slider("Quantos candles carregar (mais = mais histórico)", 1000, 8000, 4000, 500)
+
+    st.divider()
+    st.subheader("📌 Indicadores (premium)")
+    show_ma = st.toggle("MA 7/25/99 (igual Binance)", value=True)
+    show_bb = st.toggle("Bandas de Bollinger (20, 2)", value=False)
+    show_rsi = st.toggle("RSI (14)", value=True)
+    show_macd = st.toggle("MACD (12/26/9)", value=True)
+
+    st.divider()
+    st.subheader("📊 Volume")
+    clean_volume = st.toggle("Volume limpo (mais discreto)", value=True)
+    volume_colored = st.toggle("Volume verde/vermelho", value=True)
+    show_vol_ma = st.toggle("Média do volume (linha)", value=True)
+    vol_ma_period = st.slider("Período média do volume", 5, 50, 20, 1)
+
+    st.divider()
+    st.subheader("🎛️ Aparência")
+    show_price_line = st.toggle("Linha do preço atual", value=True)
+    show_crosshair = st.toggle("Crosshair (spikes)", value=True)
+    chart_height = st.slider("Altura do gráfico", 620, 980, 860, 10)
+
+    st.divider()
+    debug_mode = st.toggle("🧪 Debug (mostrar erros das fontes)", value=False)
+
 # ==============================
-# COINS (ALL BINANCE USDT)
+# COINS LIST (Binance USDT)
 # ==============================
 ALL_USDT = fetch_binance_usdt_spot_pairs()
 
 if "binance_pairs_error" in st.session_state:
-    st.warning("⚠️ Binance bloqueou exchangeInfo agora. Usei lista reduzida temporária.")
-    st.caption(st.session_state["binance_pairs_error"])
+    st.warning("⚠️ Não consegui carregar a lista completa da Binance agora. Usei lista reduzida temporária.")
+    if debug_mode:
+        st.code(st.session_state["binance_pairs_error"])
+
+# meme coins (pra formatar casas)
+meme_coins = {m for m in ALL_USDT if m.split("/")[0] in {"DOGE", "PEPE", "TURBO", "SHIB"}}
 
 moedas = st.multiselect(
     "Escolha até 3 criptos:",
@@ -274,84 +556,211 @@ moedas = st.multiselect(
 )
 
 # ==============================
+# TABS
+# ==============================
+tab_chart, tab_rsi, tab_macd = st.tabs(["📈 Gráfico", "📉 RSI", "📊 MACD"])
+
+# ==============================
 # MAIN
 # ==============================
 for moeda in moedas:
-    sym = symbol_compact(moeda)
-    window_days = window_days_for_timeframe(timeframe)
-    limit = limit_for_timeframe(timeframe)
-
     with st.expander(f"Detalhes de {moeda}", expanded=True):
-        df_utc = fetch_binance_ohlcv(sym, timeframe, limit=limit)
-        df_utc = add_indicators(df_utc)
-        df = to_local_naive(df_utc)
+        if moeda in meme_coins:
+            st.warning("🧪 Meme coin — alta volatilidade")
 
-        # Janela inicial (2d/4d/7d) — só pra começar “bonito”
-        end = df["timestamp"].max()
-        start = end - pd.Timedelta(days=window_days)
+        try:
+            df_full_utc, source, window_days, errors = build_dataset_hybrid(moeda, timeframe, candles_target=candles_target)
+        except Exception as e:
+            err_map = None
+            if isinstance(e.args, tuple) and len(e.args) >= 2 and isinstance(e.args[1], dict):
+                err_map = e.args[1]
 
-        ultimo = float(df_utc["close"].iloc[-1])
+            st.error(f"Não foi possível obter dados para {moeda}.")
+            st.caption(f"Detalhe técnico: {type(e).__name__}")
+
+            if debug_mode and err_map:
+                st.markdown("**Erros por fonte:**")
+                for k, v in err_map.items():
+                    st.code(f"{k}: {v}", language="text")
+            continue
+
+        if df_full_utc.empty or len(df_full_utc) < 20:
+            st.warning("Poucos dados para renderizar.")
+            st.caption(f"Fonte: {source}")
+            continue
+
+        # indicadores em UTC
+        df_full_utc = add_indicators(df_full_utc, show_ma, show_bb, show_rsi, show_macd, show_vol_ma, vol_ma_period)
+
+        # janela inicial (só pra abrir bonito, mas você pode arrastar pro passado)
+        df_view_utc = apply_time_window(df_full_utc, window_days)
+
+        # plot em horário Brasil
+        df_plot = to_local_naive(df_full_utc)
+        df_plot_view = to_local_naive(df_view_utc)
+
+        ultimo = float(df_full_utc["close"].iloc[-1])
+        first = float(df_view_utc["close"].iloc[0]) if len(df_view_utc) else float(df_full_utc["close"].iloc[0])
+        var_pct = ((ultimo - first) / first) * 100 if first else 0.0
+
+        st.caption(f"📡 Fonte: **{source}**")
         st.markdown(
             f"<span class='badge'>Timeframe: <b>{timeframe}</b></span>"
             f"<span class='badge'>Janela inicial: <b>{window_days} dias</b></span>"
-            f"<span class='badge'>Candles carregados: <b>{len(df)}</b></span>",
+            f"<span class='badge'>Candles carregados: <b>{len(df_full_utc)}</b></span>"
+            f"<span class='badge'>TZ: <b>{TZ_LOCAL}</b></span>",
             unsafe_allow_html=True
         )
-        st.metric(f"💰 Preço atual {moeda}", fmt_price(ultimo))
 
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.82, 0.18],
-            vertical_spacing=0.03,
-            row_titles=["Preço", "Volume"]
-        )
+        k1, k2, k3 = st.columns([1.6, 1, 1])
+        k1.metric(f"💰 Preço atual {moeda}", fmt_price(moeda, ultimo, meme_coins), f"{var_pct:.2f}%")
+        k2.metric("📈 Máxima (janela)", fmt_price(moeda, float(df_view_utc["high"].max()), meme_coins))
+        k3.metric("📉 Mínima (janela)", fmt_price(moeda, float(df_view_utc["low"].min()), meme_coins))
 
-        fig.add_trace(
-            go.Candlestick(
-                x=df["timestamp"],
-                open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-                increasing_line_color="#00C896",
-                decreasing_line_color="#FF4B4B",
-                name="Preço",
-            ),
-            row=1, col=1
-        )
+        # ======================
+        # CHART (AUTO-Y estilo Binance)
+        # ======================
+        with tab_chart:
+            fig = make_subplots(
+                rows=2, cols=1, shared_xaxes=True,
+                row_heights=[0.82, 0.18],
+                vertical_spacing=0.02,
+                row_titles=["Preço", "Volume"]
+            )
 
-        fig.add_trace(go.Scatter(x=df["timestamp"], y=df["MA7"], mode="lines", name="MA7", opacity=0.9), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df["timestamp"], y=df["MA25"], mode="lines", name="MA25", opacity=0.9), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df["timestamp"], y=df["MA99"], mode="lines", name="MA99", opacity=0.9), row=1, col=1)
+            fig.add_trace(
+                go.Candlestick(
+                    x=df_plot["timestamp"],
+                    open=df_plot["open"], high=df_plot["high"], low=df_plot["low"], close=df_plot["close"],
+                    increasing_line_color="#00C896",
+                    decreasing_line_color="#FF4B4B",
+                    increasing_fillcolor="rgba(0,200,150,0.88)",
+                    decreasing_fillcolor="rgba(255,75,75,0.88)",
+                    whiskerwidth=0.7,
+                    name="Preço",
+                    hovertemplate=(
+                        "<b>%{x|%d/%m/%Y %H:%M}</b><br>"
+                        "Open: %{open}<br>"
+                        "High: %{high}<br>"
+                        "Low: %{low}<br>"
+                        "Close: %{close}<extra></extra>"
+                    )
+                ),
+                row=1, col=1
+            )
 
-        vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df["open"], df["close"])]
-        fig.add_trace(
-            go.Bar(x=df["timestamp"], y=df["volume"], marker_color=vol_colors, opacity=0.22, name="Volume"),
-            row=2, col=1
-        )
-        fig.add_trace(go.Scatter(x=df["timestamp"], y=df["VOL_MA"], mode="lines", name="Vol MA", opacity=0.7), row=2, col=1)
+            if show_price_line:
+                fig.add_hline(y=ultimo, line_dash="dot", opacity=0.55, row=1, col=1)
 
-        fig.update_layout(
-            template="plotly_dark",
-            height=860,
-            margin=dict(l=10, r=10, t=10, b=10),
-            dragmode="pan",
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        )
+            if show_ma and "MA7" in df_plot.columns:
+                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA7"], mode="lines", opacity=0.9, name="MA7"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA25"], mode="lines", opacity=0.9, name="MA25"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA99"], mode="lines", opacity=0.9, name="MA99"), row=1, col=1)
 
-        # X começa no range da janela (igual Binance: abre "zoomado" e você arrasta pro passado)
-        fig.update_xaxes(
-            range=[start, end],
-            rangeslider=dict(visible=True, thickness=0.06),
-            gridcolor="rgba(255,255,255,0.06)",
-        )
-        fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)")
+            if show_bb and "BB_UP" in df_plot.columns:
+                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_UP"], mode="lines", opacity=0.55, name="BB Upper"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_MID"], mode="lines", opacity=0.55, name="BB Mid"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_LOW"], mode="lines", opacity=0.55, name="BB Lower"), row=1, col=1)
 
-        # Render com Auto-Y estilo Binance
-        html = plotly_autoy_html(fig, height=860)
-        st.components.v1.html(html, height=880, scrolling=False)
+            # volume colors
+            if volume_colored:
+                vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_plot["open"], df_plot["close"])]
+            else:
+                vol_colors = "rgba(255,255,255,0.22)"
 
-        st.markdown("<div class='small-note'>Dica: arraste no gráfico (pan) e use scroll para zoom. O Y vai se ajustar automaticamente ao X visível.</div>", unsafe_allow_html=True)
+            fig.add_trace(
+                go.Bar(
+                    x=df_plot["timestamp"],
+                    y=df_plot["volume"],
+                    marker_color=vol_colors,
+                    opacity=0.18 if clean_volume else 0.42,
+                    name="Volume",
+                    hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Volume: %{y}<extra></extra>"
+                ),
+                row=2, col=1
+            )
+
+            if show_vol_ma and "VOL_MA" in df_plot.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_plot["timestamp"],
+                        y=df_plot["VOL_MA"],
+                        mode="lines",
+                        opacity=0.75,
+                        name="Vol MA",
+                        hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Vol MA: %{y}<extra></extra>"
+                    ),
+                    row=2, col=1
+                )
+
+            fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
+            add_range_buttons(fig)
+
+            fig.update_layout(
+                template="plotly_dark",
+                height=chart_height,
+                margin=dict(l=10, r=10, t=10, b=10),
+                dragmode="pan",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                hovermode="x unified",
+            )
+            fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)")
+            fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)")
+
+            if show_crosshair:
+                apply_crosshair(fig)
+
+            # começa "zoomado" na janela inicial, mas com histórico carregado completo pra arrastar
+            start0 = df_plot_view["timestamp"].min()
+            end0 = df_plot_view["timestamp"].max()
+            if pd.notna(start0) and pd.notna(end0):
+                fig.update_xaxes(range=[start0, end0])
+
+            # Render com Auto-Y igual Binance
+            st.components.v1.html(plotly_autoy_html(fig, height=chart_height), height=chart_height + 30, scrolling=False)
+            st.markdown("<div class='small-note'>Dica: arraste no gráfico (pan) e use scroll para zoom. O Y se ajusta automaticamente ao X visível.</div>", unsafe_allow_html=True)
+
+        # ======================
+        # RSI (aba separada)
+        # ======================
+        with tab_rsi:
+            if not show_rsi or "RSI" not in df_full_utc.columns:
+                st.info("Ative RSI no menu lateral.")
+            else:
+                df_rsi = to_local_naive(df_full_utc)
+                fr = go.Figure()
+                fr.add_trace(go.Scatter(x=df_rsi["timestamp"], y=df_rsi["RSI"], mode="lines", name="RSI"))
+                fr.add_hline(y=70, line_dash="dot", opacity=0.55)
+                fr.add_hline(y=30, line_dash="dot", opacity=0.55)
+                fr.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
+                fr.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
+                add_range_buttons(fr)
+                if show_crosshair:
+                    apply_crosshair(fr)
+                st.plotly_chart(fr, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
+
+        # ======================
+        # MACD (aba separada)
+        # ======================
+        with tab_macd:
+            if not show_macd or "MACD" not in df_full_utc.columns:
+                st.info("Ative MACD no menu lateral.")
+            else:
+                df_m = to_local_naive(df_full_utc)
+                fm = go.Figure()
+                fm.add_trace(go.Scatter(x=df_m["timestamp"], y=df_m["MACD"], mode="lines", name="MACD"))
+                fm.add_trace(go.Scatter(x=df_m["timestamp"], y=df_m["SIGNAL"], mode="lines", name="Signal"))
+                if "HIST" in df_m.columns:
+                    fm.add_trace(go.Bar(x=df_m["timestamp"], y=df_m["HIST"], name="Hist", opacity=0.25))
+                fm.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
+                fm.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
+                add_range_buttons(fm)
+                if show_crosshair:
+                    apply_crosshair(fm)
+                st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
