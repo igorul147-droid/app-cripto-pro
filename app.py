@@ -680,154 +680,170 @@ for moeda in moedas:
         # ======================
         # CHART (AUTO-Y estilo Binance)
         # ======================
-        with tab_chart:
-            fig = make_subplots(
-                rows=2, cols=1, shared_xaxes=True,
-                row_heights=[0.82, 0.18],
-                vertical_spacing=0.02,
-                row_titles=["Preço", "Volume"]
+       with tab_chart:
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.82, 0.18],
+        vertical_spacing=0.02,
+        row_titles=["Preço", "Volume"]
+    )
+
+    # ======================
+    # Candles
+    # ======================
+    fig.add_trace(
+        go.Candlestick(
+            x=df_plot["timestamp"],
+            open=df_plot["open"], high=df_plot["high"], low=df_plot["low"], close=df_plot["close"],
+            increasing_line_color="#00C896",
+            decreasing_line_color="#FF4B4B",
+            increasing_fillcolor="rgba(0,200,150,0.88)",
+            decreasing_fillcolor="rgba(255,75,75,0.88)",
+            whiskerwidth=0.7,
+            name="Preço",
+            hovertemplate=(
+                "<b>%{x|%d/%m/%Y %H:%M}</b><br>"
+                "Open: %{open}<br>"
+                "High: %{high}<br>"
+                "Low: %{low}<br>"
+                "Close: %{close}<extra></extra>"
             )
+        ),
+        row=1, col=1
+    )
 
-            fig.add_trace(
-                go.Candlestick(
-                    x=df_plot["timestamp"],
-                    open=df_plot["open"], high=df_plot["high"], low=df_plot["low"], close=df_plot["close"],
-                    increasing_line_color="#00C896",
-                    decreasing_line_color="#FF4B4B",
-                    increasing_fillcolor="rgba(0,200,150,0.88)",
-                    decreasing_fillcolor="rgba(255,75,75,0.88)",
-                    whiskerwidth=0.7,
-                    name="Preço",
-                    hovertemplate=(
-                        "<b>%{x|%d/%m/%Y %H:%M}</b><br>"
-                        "Open: %{open}<br>"
-                        "High: %{high}<br>"
-                        "Low: %{low}<br>"
-                        "Close: %{close}<extra></extra>"
-                    )
-                ),
-                row=1, col=1
-            )
+    if show_price_line:
+        fig.add_hline(y=ultimo, line_dash="dot", opacity=0.55, row=1, col=1)
 
-            if show_price_line:
-                fig.add_hline(y=ultimo, line_dash="dot", opacity=0.55, row=1, col=1)
+    # ======================
+    # MAs
+    # ======================
+    if show_ma and "MA7" in df_plot.columns:
+        fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA7"], mode="lines", opacity=0.9, name="MA7"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA25"], mode="lines", opacity=0.9, name="MA25"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA99"], mode="lines", opacity=0.9, name="MA99"), row=1, col=1)
 
-            if show_ma and "MA7" in df_plot.columns:
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA7"], mode="lines", opacity=0.9, name="MA7"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA25"], mode="lines", opacity=0.9, name="MA25"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA99"], mode="lines", opacity=0.9, name="MA99"), row=1, col=1)
+    # ======================
+    # Bollinger
+    # ======================
+    if show_bb and "BB_UP" in df_plot.columns:
+        fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_UP"], mode="lines", opacity=0.55, name="BB Upper"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_MID"], mode="lines", opacity=0.55, name="BB Mid"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_LOW"], mode="lines", opacity=0.55, name="BB Lower"), row=1, col=1)
 
-            if show_bb and "BB_UP" in df_plot.columns:
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_UP"], mode="lines", opacity=0.55, name="BB Upper"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_MID"], mode="lines", opacity=0.55, name="BB Mid"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_LOW"], mode="lines", opacity=0.55, name="BB Lower"), row=1, col=1)
+    # ======================
+    # Volume
+    # ======================
+    if volume_colored:
+        vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_plot["open"], df_plot["close"])]
+    else:
+        vol_colors = "rgba(255,255,255,0.22)"
 
-            # volume colors
-            if volume_colored:
-                vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_plot["open"], df_plot["close"])]
-            else:
-                vol_colors = "rgba(255,255,255,0.22)"
+    fig.add_trace(
+        go.Bar(
+            x=df_plot["timestamp"],
+            y=df_plot["volume"],
+            marker_color=vol_colors,
+            opacity=0.18 if clean_volume else 0.42,
+            name="Volume",
+            hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Volume: %{y}<extra></extra>"
+        ),
+        row=2, col=1
+    )
 
-            fig.add_trace(
-                go.Bar(
-                    x=df_plot["timestamp"],
-                    y=df_plot["volume"],
-                    marker_color=vol_colors,
-                    opacity=0.18 if clean_volume else 0.42,
-                    name="Volume",
-                    hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Volume: %{y}<extra></extra>"
-                ),
-                row=2, col=1
-            )
+    if show_vol_ma and "VOL_MA" in df_plot.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df_plot["timestamp"],
+                y=df_plot["VOL_MA"],
+                mode="lines",
+                opacity=0.75,
+                name="Vol MA",
+                hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Vol MA: %{y}<extra></extra>"
+            ),
+            row=2, col=1
+        )
 
-            if show_vol_ma and "VOL_MA" in df_plot.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_plot["timestamp"],
-                        y=df_plot["VOL_MA"],
-                        mode="lines",
-                        opacity=0.75,
-                        name="Vol MA",
-                        hovertemplate="<b>%{x|%d/%m/%Y %H:%M}</b><br>Vol MA: %{y}<extra></extra>"
-                    ),
-                    row=2, col=1
-                )
+    # ======================
+    # Layout
+    # ======================
+    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
 
-            fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
+    fig.update_layout(
+        template="plotly_dark",
+        height=chart_height,
+        margin=dict(l=10, r=10, t=10, b=10),
+        dragmode="pan",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="x unified",
+    )
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)")
+    fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)")
 
-            fig.update_layout(
-                template="plotly_dark",
-                height=chart_height,
-                margin=dict(l=10, r=10, t=10, b=10),
-                dragmode="pan",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                hovermode="x unified",
-            )
-            fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)")
-            fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)")
+    if show_crosshair:
+        apply_crosshair(fig)
 
-            if show_crosshair:
-                apply_crosshair(fig)
+    # ✅ Range inicial no X = janela atual (zoomado), MAS mantendo histórico todo carregado
+    start0 = df_plot_view["timestamp"].min()
+    end0 = df_plot_view["timestamp"].max()
+    if pd.notna(start0) and pd.notna(end0):
+        fig.update_xaxes(range=[start0, end0])
 
-            # começa "zoomado" na janela inicial, mas com histórico carregado completo pra arrastar
-            start0 = df_plot_view["timestamp"].min()
-            end0 = df_plot_view["timestamp"].max()
-            if pd.notna(start0) and pd.notna(end0):
-                fig.update_xaxes(range=[start0, end0])
+    # ✅ Render com Auto-Y (o Y vai seguir o range X visível)
+    st.components.v1.html(
+        plotly_autoy_html(fig, height=chart_height),
+        height=chart_height + 30,
+        scrolling=False
+    )
+    st.markdown(
+        "<div class='small-note'>Dica: arraste no gráfico (pan) e use scroll para zoom. O Y se ajusta automaticamente ao X visível.</div>",
+        unsafe_allow_html=True
+    )
 
-            # força range inicial no X = janela atual
-            x_end = df_view["timestamp"].max()
-            x_start = df_view["timestamp"].min()
-            fig.update_xaxes(range=[x_start, x_end], row=1, col=1)
+# ======================
+# RSI (aba separada)
+# ======================
+with tab_rsi:
+    if not show_rsi or "RSI" not in df_full_utc.columns:
+        st.info("Ative RSI no menu lateral.")
+    else:
+        df_rsi = to_local_naive(df_full_utc)
+        fr = go.Figure()
+        fr.add_trace(go.Scatter(x=df_rsi["timestamp"], y=df_rsi["RSI"], mode="lines", name="RSI"))
+        fr.add_hline(y=70, line_dash="dot", opacity=0.55)
+        fr.add_hline(y=30, line_dash="dot", opacity=0.55)
+        fr.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
+        fr.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
+        add_range_buttons(fr)
+        if show_crosshair:
+            apply_crosshair(fr)
 
-            # Render com Auto-Y igual Binance
-            st.components.v1.html(plotly_autoy_html(fig, height=chart_height), height=chart_height + 30, scrolling=False)
-            st.markdown("<div class='small-note'>Dica: arraste no gráfico (pan) e use scroll para zoom. O Y se ajusta automaticamente ao X visível.</div>", unsafe_allow_html=True)
+        # ✅ Aqui era o erro: você estava renderizando "fig"
+        st.plotly_chart(fr, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
-        # ======================
-        # RSI (aba separada)
-        # ======================
-        with tab_rsi:
-            if not show_rsi or "RSI" not in df_full_utc.columns:
-                st.info("Ative RSI no menu lateral.")
-            else:
-                df_rsi = to_local_naive(df_full_utc)
-                fr = go.Figure()
-                fr.add_trace(go.Scatter(x=df_rsi["timestamp"], y=df_rsi["RSI"], mode="lines", name="RSI"))
-                fr.add_hline(y=70, line_dash="dot", opacity=0.55)
-                fr.add_hline(y=30, line_dash="dot", opacity=0.55)
-                fr.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
-                fr.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
-                add_range_buttons(fr)
-                if show_crosshair:
-                    apply_crosshair(fr)
-                st.components.v1.html(
-                    plotly_autoy_html(fig, height=chart_height),
-                    height=chart_height + 30,
-                    scrolling=False
-                )
+# ======================
+# MACD (aba separada)
+# ======================
+with tab_macd:
+    if not show_macd or "MACD" not in df_full_utc.columns:
+        st.info("Ative MACD no menu lateral.")
+    else:
+        df_m = to_local_naive(df_full_utc)
+        fm = go.Figure()
+        fm.add_trace(go.Scatter(x=df_m["timestamp"], y=df_m["MACD"], mode="lines", name="MACD"))
+        fm.add_trace(go.Scatter(x=df_m["timestamp"], y=df_m["SIGNAL"], mode="lines", name="Signal"))
+        if "HIST" in df_m.columns:
+            fm.add_trace(go.Bar(x=df_m["timestamp"], y=df_m["HIST"], name="Hist", opacity=0.25))
+        fm.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
+        fm.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
+        add_range_buttons(fm)
+        if show_crosshair:
+            apply_crosshair(fm)
 
-        # ======================
-        # MACD (aba separada)
-        # ======================
-        with tab_macd:
-            if not show_macd or "MACD" not in df_full_utc.columns:
-                st.info("Ative MACD no menu lateral.")
-            else:
-                df_m = to_local_naive(df_full_utc)
-                fm = go.Figure()
-                fm.add_trace(go.Scatter(x=df_m["timestamp"], y=df_m["MACD"], mode="lines", name="MACD"))
-                fm.add_trace(go.Scatter(x=df_m["timestamp"], y=df_m["SIGNAL"], mode="lines", name="Signal"))
-                if "HIST" in df_m.columns:
-                    fm.add_trace(go.Bar(x=df_m["timestamp"], y=df_m["HIST"], name="Hist", opacity=0.25))
-                fm.update_layout(template="plotly_dark", height=360, margin=dict(l=10, r=10, t=10, b=10))
-                fm.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
-                add_range_buttons(fm)
-                if show_crosshair:
-                    apply_crosshair(fm)
-                st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
+        st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
