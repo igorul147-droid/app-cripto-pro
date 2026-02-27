@@ -417,6 +417,8 @@ def add_range_buttons(fig):
 
 def apply_crosshair(fig):
     fig.update_layout(hovermode="x unified", spikedistance=-1)
+    # Y do preço: ticks de 1000 em 1000 (BTC e outras coins "grandes")
+    fig.update_yaxes(dtick=1000, row=1, col=1)
     fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
                      spikethickness=1, spikecolor="rgba(255,255,255,0.35)")
     fig.update_yaxes(fixedrange=False, row=1, col=1)  # preço
@@ -490,12 +492,19 @@ def plotly_autoy_html(fig, height: int = 840) -> str:
   }}
 
   function autoY() {{
-    const xr = getXRangeMs();
-    if (!xr) {{
-      // sem range definido: autorange normal
-      Plotly.relayout(gd, {{ 'yaxis.autorange': true }});
-      return;
-    }}
+    let xr = getXRangeMs();
+if (!xr) {
+  const rs = gd.layout?.xaxis?.rangeslider?.range;
+  if (rs && rs.length === 2) {
+    const a = parseDate(rs[0]);
+    const b = parseDate(rs[1]);
+    if (a !== null && b !== null) xr = [Math.min(a,b), Math.max(a,b)];
+  }
+}
+if (!xr) {
+  Plotly.relayout(gd, {'yaxis.autorange': true});
+  return;
+}
 
     const x0 = xr[0], x1 = xr[1];
 
@@ -769,7 +778,6 @@ for moeda in moedas:
                 )
 
             fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
-            add_range_buttons(fig)
 
             fig.update_layout(
                 template="plotly_dark",
@@ -790,6 +798,11 @@ for moeda in moedas:
             end0 = df_plot_view["timestamp"].max()
             if pd.notna(start0) and pd.notna(end0):
                 fig.update_xaxes(range=[start0, end0])
+
+            # força range inicial no X = janela atual
+            x_end = df_view["timestamp"].max()
+            x_start = df_view["timestamp"].min()
+            fig.update_xaxes(range=[x_start, x_end], row=1, col=1)
 
             # Render com Auto-Y igual Binance
             st.components.v1.html(plotly_autoy_html(fig, height=chart_height), height=chart_height + 30, scrolling=False)
@@ -839,6 +852,7 @@ for moeda in moedas:
                 st.plotly_chart(fm, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
 
 st.info("✅ Modo híbrido ativo")
+
 
 
 
