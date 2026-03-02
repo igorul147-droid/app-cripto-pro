@@ -34,19 +34,12 @@ def _trade_row_from_msg(t: dict) -> dict:
         "time": ts,
         "price": _to_float(t["p"]),
         "qty": _to_float(t["q"]),
-        "is_maker": bool(t.get("m", False)),  # True ~ sell agressivo (maker)
+        "is_maker": bool(t.get("m", False)),  # True ~ sell agressivo
     }
 
 
 class RealtimeStore:
-    """
-    Mantém:
-      - df_ohlcv: candles 1m (histórico + candle em formação)
-      - trades: últimos trades (tape)
-    Atualiza via WebSocket Binance.
-    """
-
-    def __init__(self, symbol_compact: str, base_df_ohlcv: pd.DataFrame, max_trades: int = 200):
+    def __init__(self, symbol_compact: str, base_df_ohlcv: pd.DataFrame, max_trades: int = 250):
         self.symbol = symbol_compact.upper()
         self.lock = threading.Lock()
 
@@ -98,7 +91,6 @@ class RealtimeStore:
                             elif row["timestamp"] > last_ts:
                                 self.df_ohlcv = pd.concat([self.df_ohlcv, pd.DataFrame([row])], ignore_index=True)
 
-                        # limita memória (opcional)
                         if len(self.df_ohlcv) > 8000:
                             self.df_ohlcv = self.df_ohlcv.tail(8000).reset_index(drop=True)
 
@@ -128,7 +120,6 @@ class RealtimeStore:
                 with self.lock:
                     self.last_ws_error = str(e)[:300]
 
-            # reconecta com backoff curto
             for _ in range(10):
                 if self._stop.is_set():
                     break
