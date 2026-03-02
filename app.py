@@ -21,7 +21,7 @@ from crypto_app.utils import (
     to_local_naive,
 )
 
-st.set_page_config(layout="wide", page_title="Análise Cripto PRO+")
+st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ — Premium")
 
 st.markdown(
     """
@@ -49,7 +49,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("🚀 Análise Cripto PRO+")
+st.title("🚀 Análise Cripto PRO+ — Premium")
 
 with st.sidebar:
     st.header("⚙️ Controles")
