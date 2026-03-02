@@ -1,5 +1,4 @@
 import time
-
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
@@ -30,7 +29,6 @@ st.html("""
     padding: 14px;
     border-radius: 14px;
   }
-  .small-note {opacity: .75; font-size: 0.9rem;}
   .badge {
     display:inline-block; padding:6px 10px; border-radius:999px;
     border:1px solid rgba(255,255,255,0.12);
@@ -53,7 +51,7 @@ with st.sidebar:
     st.divider()
     st.caption("Modo PRO: candle 1m ao vivo via WebSocket + Time & Trades.")
 
-    candles_to_load = st.slider("Histórico inicial (candles 1m)", 300, 5000, 1200, 100)
+    candles_to_load = st.slider("Histórico inicial (candles 1m)", 300, 5000, 800, 100)
     candles_visible = st.slider(
         "Zoom inicial (candles)",
         50,
@@ -81,8 +79,18 @@ with st.sidebar:
 
 ALL_USDT = fetch_binance_usdt_spot_pairs()
 if not ALL_USDT:
-    st.error("Não há pares disponíveis para carregar no momento.")
+    st.error("Não há pares disponíveis.")
     st.stop()
+
+if "binance_pairs_error" in st.session_state:
+    st.warning("⚠️ Lista Binance falhou (fallback).")
+    with st.expander("Debug lista Binance"):
+        st.write(st.session_state["binance_pairs_error"])
+
+# Debug de HTTP (se o REST falhar)
+if "last_http_error" in st.session_state:
+    with st.expander("🧪 Debug HTTP (Binance)", expanded=False):
+        st.json(st.session_state["last_http_error"])
 
 search = st.text_input("Digite o ticker…", placeholder="Ex: BTC, PEPE, SOL").strip().upper()
 filtered = [m for m in ALL_USDT if m.startswith(search + "/") or m.split("/")[0].startswith(search)] if search else ALL_USDT
@@ -99,12 +107,13 @@ if not moedas:
     st.info("Selecione ao menos 1 moeda.")
     st.stop()
 
+# Stores WS
 if "rt_stores" not in st.session_state:
     st.session_state["rt_stores"] = {}
 
 rt_stores: dict = st.session_state["rt_stores"]
 
-# remove stores não selecionadas
+# Remove stores não selecionadas
 wanted = {symbol_compact(m) for m in moedas}
 for sym in list(rt_stores.keys()):
     if sym not in wanted:
@@ -114,11 +123,15 @@ for sym in list(rt_stores.keys()):
             pass
         rt_stores.pop(sym, None)
 
-# cria stores faltantes
+# Cria stores faltantes (NÃO QUEBRA se REST falhar)
 for moeda in moedas:
     sym = symbol_compact(moeda)
     if sym not in rt_stores:
-        base_df = fetch_binance_klines(sym, interval="1m", limit=int(candles_to_load))
+        try:
+            base_df = fetch_binance_klines(sym, interval="1m", limit=int(candles_to_load))
+        except Exception:
+            base_df = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
         rt = RealtimeStore(sym, base_df_ohlcv=base_df, max_trades=300)
         rt.start()
         rt_stores[sym] = rt
@@ -131,7 +144,8 @@ for moeda in moedas:
     df_full_utc, trades, meta = rt.snapshot()
 
     if df_full_utc.empty:
-        st.warning(f"Aguardando dados WS para {moeda}…")
+        with col_main:
+            st.warning(f"Aguardando dados WS para {moeda}…")
         continue
 
     df_full_utc = add_indicators(
@@ -165,13 +179,7 @@ for moeda in moedas:
         k2.metric("📈 Máxima (zoom)", f"{float(df_full_utc['high'].tail(len(df_plot_view)).max()):,.2f}")
         k3.metric("📉 Mínima (zoom)", f"{float(df_full_utc['low'].tail(len(df_plot_view)).min()):,.2f}")
 
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            row_heights=[0.82, 0.18],
-            vertical_spacing=0.02,
-        )
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.82, 0.18], vertical_spacing=0.02)
 
         fig.add_trace(
             go.Candlestick(
@@ -201,18 +209,8 @@ for moeda in moedas:
             fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_LOW"], mode="lines", opacity=0.35, name="BB Lower"), row=1, col=1)
 
         vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_plot["open"], df_plot["close"])]
-        fig.add_trace(
-            go.Bar(
-                x=df_plot["timestamp"],
-                y=df_plot["volume"],
-                marker_color=vol_colors,
-                opacity=0.28,
-                name="Volume",
-                showlegend=True,
-            ),
-            row=2,
-            col=1,
-        )
+        fig.add_trace(go.Bar(x=df_plot["timestamp"], y=df_plot["volume"], marker_color=vol_colors, opacity=0.28, name="Volume"), row=2, col=1)
+
         if "VOL_MA" in df_plot.columns:
             fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["VOL_MA"], mode="lines", opacity=0.7, name="Vol MA"), row=2, col=1)
 
@@ -261,7 +259,6 @@ for moeda in moedas:
                 tdf = pd.DataFrame(trades).head(int(tape_size))
                 tdf["hora"] = tdf["time"].dt.tz_convert(TZ_LOCAL).dt.strftime("%H:%M:%S")
                 tdf["lado"] = tdf["is_maker"].map(lambda x: "SELL" if x else "BUY")
-                tdf = tdf[["hora", "lado", "price", "qty"]]
-                st.dataframe(tdf, use_container_width=True, height=520)
+                st.dataframe(tdf[["hora", "lado", "price", "qty"]], use_container_width=True, height=520)
             else:
                 st.info("Aguardando trades…")
