@@ -4,130 +4,83 @@ import time
 from collections import deque
 
 import pandas as pd
-import websocket  # websocket-client
-
-BINANCE_WS = "wss://stream.binance.com:9443/stream?streams="
+import websocket
 
 
-def _to_float(x, default=0.0):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
-def _kline_row_from_msg(k: dict) -> dict:
-    ts = pd.to_datetime(int(k["t"]), unit="ms", utc=True)
-    return {
-        "timestamp": ts,
-        "open": _to_float(k["o"]),
-        "high": _to_float(k["h"]),
-        "low": _to_float(k["l"]),
-        "close": _to_float(k["c"]),
-        "volume": _to_float(k["v"]),
-    }
-
-
-def _trade_row_from_msg(t: dict) -> dict:
-    ts = pd.to_datetime(int(t["T"]), unit="ms", utc=True)
-    return {
-        "time": ts,
-        "price": _to_float(t["p"]),
-        "qty": _to_float(t["q"]),
-        "is_maker": bool(t.get("m", False)),  # True ~ sell agressivo
-    }
+BYBIT_WS = "wss://stream.bybit.com/v5/public/spot"
 
 
 class RealtimeStore:
-    def __init__(self, symbol_compact: str, base_df_ohlcv: pd.DataFrame, max_trades: int = 250):
-        self.symbol = symbol_compact.upper()
-        self.lock = threading.Lock()
 
-        self.df_ohlcv = base_df_ohlcv.copy()
+    def __init__(self, symbol, base_df, max_trades=200):
+        self.symbol = symbol
+        self.df = base_df.copy()
         self.trades = deque(maxlen=max_trades)
-
-        self.last_update_ts = time.time()
-        self.last_ws_error = None
-
+        self.lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
 
-    def stop(self):
-        self._stop.set()
-
-    def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
-
     def start(self):
-        if self.is_running():
+        if self._thread:
             return
-        self._stop.clear()
-        t = threading.Thread(target=self._run, name=f"ws-{self.symbol}", daemon=True)
-        self._thread = t
-        t.start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def _run(self):
-        streams = f"{self.symbol.lower()}@kline_1m/{self.symbol.lower()}@aggTrade"
-        url = BINANCE_WS + streams
+
+        def on_open(ws):
+            sub_msg = {
+                "op": "subscribe",
+                "args": [
+                    f"kline.1.{self.symbol}",
+                    f"publicTrade.{self.symbol}"
+                ]
+            }
+            ws.send(json.dumps(sub_msg))
 
         def on_message(ws, message):
-            try:
-                msg = json.loads(message)
-                data = msg.get("data", {})
-                event_type = data.get("e")
+            msg = json.loads(message)
 
-                with self.lock:
-                    if event_type == "kline":
-                        k = data["k"]
-                        row = _kline_row_from_msg(k)
+            if "topic" not in msg:
+                return
 
-                        if self.df_ohlcv.empty:
-                            self.df_ohlcv = pd.DataFrame([row])
-                        else:
-                            last_ts = self.df_ohlcv["timestamp"].iloc[-1]
-                            if row["timestamp"] == last_ts:
-                                for col in ["open", "high", "low", "close", "volume"]:
-                                    self.df_ohlcv.at[self.df_ohlcv.index[-1], col] = row[col]
-                            elif row["timestamp"] > last_ts:
-                                self.df_ohlcv = pd.concat([self.df_ohlcv, pd.DataFrame([row])], ignore_index=True)
-
-                        if len(self.df_ohlcv) > 8000:
-                            self.df_ohlcv = self.df_ohlcv.tail(8000).reset_index(drop=True)
-
-                    elif event_type == "aggTrade":
-                        tr = _trade_row_from_msg(data)
-                        self.trades.appendleft(tr)
-
-                    self.last_update_ts = time.time()
-
-            except Exception as e:
-                with self.lock:
-                    self.last_ws_error = str(e)[:300]
-
-        def on_error(ws, error):
             with self.lock:
-                self.last_ws_error = str(error)[:300]
 
-        def on_close(ws, status_code, msg):
-            with self.lock:
-                self.last_ws_error = f"closed: {status_code} {msg}"[:300]
+                if msg["topic"].startswith("kline"):
+                    k = msg["data"][0]
+                    ts = pd.to_datetime(int(k["start"]), unit="ms", utc=True)
 
-        while not self._stop.is_set():
-            try:
-                ws = websocket.WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close)
-                ws.run_forever(ping_interval=20, ping_timeout=10)
-            except Exception as e:
-                with self.lock:
-                    self.last_ws_error = str(e)[:300]
+                    row = {
+                        "timestamp": ts,
+                        "open": float(k["open"]),
+                        "high": float(k["high"]),
+                        "low": float(k["low"]),
+                        "close": float(k["close"]),
+                        "volume": float(k["volume"]),
+                    }
 
-            for _ in range(10):
-                if self._stop.is_set():
-                    break
-                time.sleep(0.3)
+                    if self.df.empty:
+                        self.df = pd.DataFrame([row])
+                    else:
+                        if ts == self.df["timestamp"].iloc[-1]:
+                            for col in row:
+                                self.df.at[self.df.index[-1], col] = row[col]
+                        elif ts > self.df["timestamp"].iloc[-1]:
+                            self.df = pd.concat([self.df, pd.DataFrame([row])], ignore_index=True)
 
-    def snapshot(self):
-        with self.lock:
-            df = self.df_ohlcv.copy()
-            trades = list(self.trades)
-            meta = {"last_update_ts": self.last_update_ts, "last_ws_error": self.last_ws_error}
-        return df, trades, meta
+                if msg["topic"].startswith("publicTrade"):
+                    for t in msg["data"]:
+                        self.trades.appendleft({
+                            "time": pd.to_datetime(int(t["T"]), unit="ms", utc=True),
+                            "price": float(t["p"]),
+                            "qty": float(t["v"]),
+                            "side": t["S"],
+                        })
+
+        ws = websocket.WebSocketApp(
+            BYBIT_WS,
+            on_open=on_open,
+            on_message=on_message,
+        )
+
+        ws.run_forever()
