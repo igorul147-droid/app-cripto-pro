@@ -10,12 +10,12 @@ from plotly.subplots import make_subplots
 from plotly.utils import PlotlyJSONEncoder
 from streamlit_autorefresh import st_autorefresh
  
- # ==============================
- # PAGE
- # ==============================
- st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ — Premium")
+# ==============================
+# PAGE
+# ==============================
+st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ — Premium")
  
- st.markdown(
+st.markdown(
      """
      <style>
        .block container {padding top: 1.1rem;}
@@ -41,28 +41,28 @@ from streamlit_autorefresh import st_autorefresh
      unsafe_allow_html=True
  )
  
- st.title("🚀 Análise Cripto PRO+ — Premium")
+st.title("🚀 Análise Cripto PRO+")
  
- # ==============================
- # SETTINGS / HELPERS
- # ==============================
- TZ_LOCAL = "America/Sao_Paulo"
- 
- def timeframe_freq(tf: str)  > str:
+# ==============================
+# SETTINGS / HELPERS
+# ==============================
+TZ_LOCAL = "America/Sao_Paulo"
+
+def timeframe_freq(tf: str)  > str:
      return {"1h": "1H", "4h": "4H", "1d": "1D"}.get(tf, "1D")
  
- def binance_interval(tf: str)  > str:
+def binance_interval(tf: str)  > str:
      return {"1h": "1h", "4h": "4h", "1d": "1d"}.get(tf, "1d")
  
- def default_visible_candles(tf: str)  > int:
+def default_visible_candles(tf: str)  > int:
      # “abrir no máximo 2 semanas”
      # 1h: 14*24 = 336 | 4h: 14*6 = 84 | 1d: 14
      return {"1h": 336, "4h": 84, "1d": 14}.get(tf, 336)
  
- def fmt_price(moeda: str, p: float, meme_coins: set[str])  > str:
+def fmt_price(moeda: str, p: float, meme_coins: set[str])  > str:
      return f"${p:,.6f}" if moeda in meme_coins else f"${p:,.2f}"
  
- def ensure_timestamp_utc(series: pd.Series)  > pd.Series:
+def ensure_timestamp_utc(series: pd.Series)  > pd.Series:
      s = series
      if not pd.api.types.is_datetime64_any_dtype(s):
          s = pd.to_datetime(s, utc=True, errors="coerce")
@@ -73,12 +73,12 @@ from streamlit_autorefresh import st_autorefresh
              s = s.dt.tz_convert("UTC")
      return s
  
- def to_local_naive(df: pd.DataFrame)  > pd.DataFrame:
+def to_local_naive(df: pd.DataFrame)  > pd.DataFrame:
      d = df.copy()
      d["timestamp"] = ensure_timestamp_utc(d["timestamp"]).dt.tz_convert(TZ_LOCAL).dt.tz_localize(None)
      return d
  
- def normalize_ohlcv(df: pd.DataFrame)  > pd.DataFrame:
+def normalize_ohlcv(df: pd.DataFrame)  > pd.DataFrame:
      d = df.copy()
      d["timestamp"] = ensure_timestamp_utc(d["timestamp"])
      d = d.sort_values("timestamp").reset_index(drop=True)
@@ -91,13 +91,13 @@ from streamlit_autorefresh import st_autorefresh
      d["volume"] = d["volume"].fillna(0.0)
      return d
  
- def symbol_compact(moeda: str)  > str:
+def symbol_compact(moeda: str)  > str:
      return moeda.replace("/", "")
  
- def add_range_slider(fig):
+def add_range_slider(fig):
      fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
  
- def apply_crosshair(fig: go.Figure):
+def apply_crosshair(fig: go.Figure):
      # funciona tanto em subplots quanto figura simples
      fig.update_layout(hovermode="x unified", spikedistance= 1)
      fig.update_xaxes(
@@ -109,7 +109,7 @@ from streamlit_autorefresh import st_autorefresh
          spikethickness=1, spikecolor="rgba(255,255,255,0.25)",
      )
  
- def compute_dtick_for_range(ymin: float, ymax: float)  > float | None:
+def compute_dtick_for_range(ymin: float, ymax: float)  > float | None:
      rng = float(ymax   ymin)
      if rng <= 0 or not np.isfinite(rng):
          return None
@@ -122,10 +122,10 @@ from streamlit_autorefresh import st_autorefresh
          return 10000.0
      return None
  
- # ==============================
- # NETWORK (RETRY)
- # ==============================
- def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 0.8):
+# ==============================
+# NETWORK (RETRY)
+# ==============================
+def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 0.8):
      headers = {
          "User Agent": "Mozilla/5.0 (StreamlitApp)",
          "Accept": "application/json,text/plain,*/*",
@@ -145,11 +145,11 @@ from streamlit_autorefresh import st_autorefresh
              time.sleep(base_sleep * (i + 1))
      raise last_err
  
- # ==============================
- # BINANCE SYMBOL LIST (USDT only, remove USDC/FDUSD)
- # ==============================
- @st.cache_data(ttl=60 * 60)
- def fetch_binance_usdt_spot_pairs()  > list[str]:
+# ==============================
+# BINANCE SYMBOL LIST (USDT only, remove USDC/FDUSD)
+# ==============================
+@st.cache_data(ttl=60 * 60)
+def fetch_binance_usdt_spot_pairs()  > list[str]:
      endpoints = [
          "https://api.binance.com/api/v3/exchangeInfo",
          "https://api1.binance.com/api/v3/exchangeInfo",
@@ -189,11 +189,11 @@ from streamlit_autorefresh import st_autorefresh
      st.session_state["binance_pairs_error"] = str(last_err) if last_err else "Falha desconhecida"
      return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT", "DOGE/USDT", "PEPE/USDT", "TURBO/USDT"]
  
- # ==============================
- # DATA: BINANCE OHLCV WITH PAGINATION (HUGE HISTORY)
- # ==============================
- @st.cache_data(ttl=120)
- def fetch_binance_ohlcv_paged(symbol: str, interval: str, total_limit: int)  > pd.DataFrame:
+# ==============================
+# DATA: BINANCE OHLCV WITH PAGINATION (HUGE HISTORY)
+# ==============================
+@st.cache_data(ttl=120)
+def fetch_binance_ohlcv_paged(symbol: str, interval: str, total_limit: int)  > pd.DataFrame:
      """
      total_limit pode ser > 1000.
      Estratégia: puxa blocos de 1000 usando endTime e vai voltando.
@@ -256,11 +256,11 @@ from streamlit_autorefresh import st_autorefresh
      out = pd.concat(chunks, axis=0).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
      return out
  
- # ==============================
- # FALLBACK: BYBIT (if Binance totally blocked)
- # ==============================
- @st.cache_data(ttl=120)
- def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int)  > pd.DataFrame:
+# ==============================
+# FALLBACK: BYBIT (if Binance totally blocked)
+# ==============================
+@st.cache_data(ttl=120)
+def fetch_bybit_ohlcv(symbol: str, timeframe: str, limit: int)  > pd.DataFrame:
      interval_map = {"1h": "60", "4h": "240", "1d": "D"}
      url = "https://api.bybit.com/v5/market/kline"
      params = {
@@ -278,10 +278,10 @@ from streamlit_autorefresh import st_autorefresh
      df = df[["timestamp", "open", "high", "low", "close", "volume"]]
      return normalize_ohlcv(df)
  
- # ==============================
- # INDICATORS
- # ==============================
- def add_indicators(df: pd.DataFrame, show_ma: bool, show_bb: bool, show_rsi: bool, show_macd: bool,
+# ==============================
+# INDICATORS
+# ==============================
+def add_indicators(df: pd.DataFrame, show_ma: bool, show_bb: bool, show_rsi: bool, show_macd: bool,
                     show_vol_ma: bool, vol_ma_period: int)  > pd.DataFrame:
      d = df.copy()
  
@@ -318,10 +318,10 @@ from streamlit_autorefresh import st_autorefresh
  
      return d
  
- # ==============================
- # PLOTLY AUTO Y HTML (BINANCE LIKE)
- # ==============================
- def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04)  > str:
+# ==============================
+# PLOTLY AUTO Y HTML (BINANCE LIKE)
+# ==============================
+def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04)  > str:
      """
      Renderiza Plotly em HTML com:
        listeners para relayout (zoom/pan no X)
@@ -459,9 +459,9 @@ from streamlit_autorefresh import st_autorefresh
  """
      return template.format(height=height, payload=payload, pad=float(y_padding_ratio))
  
- # ==============================
- # SIDEBAR CONTROLS
- # ==============================
+# ==============================
+# SIDEBAR CONTROLS
+# ==============================
  with st.sidebar:
      st.header("⚙️ Controles")
  
@@ -517,9 +517,9 @@ from streamlit_autorefresh import st_autorefresh
      st.divider()
      debug_mode = st.toggle("🧪 Debug (mostrar erros)", value=False)
  
- # ==============================
- # COINS LIST + SEARCH
- # ==============================
+# ==============================
+# COINS LIST + SEARCH
+# ==============================
  ALL_USDT = fetch_binance_usdt_spot_pairs()
  
  if "binance_pairs_error" in st.session_state:
