@@ -2,13 +2,35 @@ import json
 import plotly.graph_objects as go
 from plotly.utils import PlotlyJSONEncoder
 
+
+def add_range_slider(fig):
+    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
+
+
+def apply_crosshair(fig: go.Figure):
+    fig.update_layout(hovermode="x unified", spikedistance=-1)
+    fig.update_xaxes(
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikethickness=1,
+        spikecolor="rgba(255,255,255,0.35)",
+    )
+    fig.update_yaxes(
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikethickness=1,
+        spikecolor="rgba(255,255,255,0.25)",
+    )
+
+
 def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04) -> str:
     fig_dict = fig.to_plotly_json()
     payload = json.dumps(fig_dict, cls=PlotlyJSONEncoder)
     pad = float(y_padding_ratio)
 
-    template = f"""
-<!doctype html>
+    template = f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
@@ -91,9 +113,9 @@ def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04
 
       if (!isFinite(ymin) || !isFinite(ymax) || ymax <= ymin) return;
 
-      const pad = (ymax - ymin) * {pad};
-      const y0 = ymin - pad;
-      const y1 = ymax + pad;
+      const p = (ymax - ymin) * {pad};
+      const y0 = ymin - p;
+      const y1 = ymax + p;
 
       const dtick = clampDtick(y0, y1);
 
@@ -101,11 +123,7 @@ def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04
         'yaxis.range': [y0, y1],
       }};
 
-      if (dtick) {{
-        upd['yaxis.dtick'] = dtick;
-      }} else {{
-        upd['yaxis.dtick'] = null;
-      }}
+      upd['yaxis.dtick'] = dtick ? dtick : null;
 
       Plotly.relayout(gd, upd);
     }}
