@@ -1,3 +1,7 @@
+import json
+import plotly.graph_objects as go
+from plotly.utils import PlotlyJSONEncoder
+
 def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04) -> str:
     fig_dict = fig.to_plotly_json()
     payload = json.dumps(fig_dict, cls=PlotlyJSONEncoder)
