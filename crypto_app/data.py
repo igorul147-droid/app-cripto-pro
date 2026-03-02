@@ -17,12 +17,17 @@ def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 
     }
 
     last_err = None
+    last_status = None
+    last_text = None
+
     for i in range(attempts):
         try:
             r = requests.get(url, params=params, headers=headers, timeout=20)
+            last_status = r.status_code
+            last_text = r.text[:220]
 
             if r.status_code in (418, 429) or 500 <= r.status_code <= 599:
-                last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+                last_err = RuntimeError(f"HTTP {r.status_code}: {last_text}")
                 time.sleep(base_sleep * (i + 1))
                 continue
 
@@ -33,6 +38,13 @@ def request_json(url: str, params: dict, attempts: int = 3, base_sleep: float = 
             last_err = e
             time.sleep(base_sleep * (i + 1))
 
+    st.session_state["last_http_error"] = {
+        "url": url,
+        "params": params,
+        "status": last_status,
+        "text": last_text,
+        "err": str(last_err)[:300],
+    }
     raise last_err
 
 
@@ -77,7 +89,7 @@ def fetch_binance_usdt_spot_pairs() -> list[str]:
 
 
 @st.cache_data(ttl=120)
-def fetch_binance_ohlcv_paged(symbol: str, interval: str, total_limit: int) -> pd.DataFrame:
+def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 800) -> pd.DataFrame:
     url_candidates = [
         "https://api.binance.com/api/v3/klines",
         "https://api1.binance.com/api/v3/klines",
@@ -86,74 +98,30 @@ def fetch_binance_ohlcv_paged(symbol: str, interval: str, total_limit: int) -> p
         "https://data-api.binance.vision/api/v3/klines",
     ]
 
-    limit_step = 1000
-    remaining = int(total_limit)
-    end_time_ms = None
-    chunks: list[pd.DataFrame] = []
+    params = {"symbol": symbol, "interval": interval, "limit": str(int(limit))}
     last_err = None
 
-    while remaining > 0:
-        step = min(limit_step, remaining)
-        params = {"symbol": symbol, "interval": interval, "limit": str(step)}
-        if end_time_ms is not None:
-            params["endTime"] = str(end_time_ms)
+    for url in url_candidates:
+        try:
+            payload = request_json(url, params=params, attempts=2, base_sleep=0.35)
 
-        got = False
-        for url in url_candidates:
-            try:
-                payload = request_json(url, params=params, attempts=2, base_sleep=0.3)
-                if not payload:
-                    raise RuntimeError("Binance klines vazio")
+            df = pd.DataFrame(
+                payload,
+                columns=[
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore",
+                ],
+            )
+            df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+            df = normalize_ohlcv(df)
 
-                df = pd.DataFrame(
-                    payload,
-                    columns=[
-                        "timestamp", "open", "high", "low", "close", "volume",
-                        "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore",
-                    ],
-                )
-                df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
-                df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-                df = normalize_ohlcv(df)
-                if df.empty:
-                    raise RuntimeError("Binance klines normalizado vazio")
+            if df.empty:
+                raise RuntimeError("klines vazio")
 
-                chunks.append(df)
-                end_time_ms = int(df["timestamp"].min().value // 10**6) - 1
-                remaining -= step
-                got = True
-                break
+            return df
 
-            except Exception as e:
-                last_err = e
+        except Exception as e:
+            last_err = e
 
-        if not got:
-            raise RuntimeError(f"Falha ao paginar Binance: {last_err}")
-
-        if len(chunks) >= 2 and chunks[-1]["timestamp"].max() >= chunks[-2]["timestamp"].min():
-            break
-
-    out = pd.concat(chunks, axis=0).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    return out
-
-
-@st.cache_data(ttl=120)
-def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 1200) -> pd.DataFrame:
-    url = "https://api.binance.com/api/v3/klines"
-    payload = request_json(
-        url,
-        params={"symbol": symbol, "interval": interval, "limit": str(limit)},
-        attempts=2,
-        base_sleep=0.3,
-    )
-
-    df = pd.DataFrame(
-        payload,
-        columns=[
-            "timestamp", "open", "high", "low", "close", "volume",
-            "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore",
-        ],
-    )
-    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
-    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-    return normalize_ohlcv(df)
+    raise RuntimeError(f"Falha ao obter klines ({symbol}) em todos endpoints: {last_err}")
