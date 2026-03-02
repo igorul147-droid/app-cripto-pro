@@ -21,35 +21,35 @@ from crypto_app.utils import (
     to_local_naive,
 )
 
-st.set_page_config(layout="wide", page_title="Análise Cripto PRO+ — Premium")
+st.set_page_config(layout="wide", page_title="Análise Cripto PRO+")
 
-st.markdown(
+# ✅ CSS via st.html (evita aparecer como texto)
+st.html(
     """
-    <style>
-      .block-container {padding-top: 1.1rem;}
-      div[data-testid="stSidebar"] {border-right: 1px solid rgba(255,255,255,0.06);}
-      .stMetric {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(255,255,255,0.06);
-        padding: 14px;
-        border-radius: 14px;
-      }
-      .small-note {opacity: .75; font-size: 0.9rem;}
-      .badge {
-        display:inline-block; padding:6px 10px; border-radius:999px;
-        border:1px solid rgba(255,255,255,0.12);
-        background: rgba(255,255,255,0.04);
-        font-size: 0.9rem; opacity: 0.95;
-        margin-right: 8px;
-      }
-      code {font-size: 0.9rem;}
-      .muted {opacity: .8;}
-    </style>
-    """,
-    unsafe_allow_html=True,
+<style>
+  .block-container {padding-top: 1.1rem;}
+  div[data-testid="stSidebar"] {border-right: 1px solid rgba(255,255,255,0.06);}
+  .stMetric {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    padding: 14px;
+    border-radius: 14px;
+  }
+  .small-note {opacity: .75; font-size: 0.9rem;}
+  .badge {
+    display:inline-block; padding:6px 10px; border-radius:999px;
+    border:1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+    font-size: 0.9rem; opacity: 0.95;
+    margin-right: 8px;
+  }
+  code {font-size: 0.9rem;}
+  .muted {opacity: .8;}
+</style>
+"""
 )
 
-st.title("🚀 Análise Cripto PRO+ — Premium")
+st.title("🚀 Análise Cripto PRO+")
 
 with st.sidebar:
     st.header("⚙️ Controles")
@@ -130,10 +130,10 @@ if "selected_pairs" not in st.session_state:
 selected_now = [x for x in st.session_state["selected_pairs"] if x in ALL_USDT]
 options = selected_now + [x for x in filtered if x not in selected_now]
 
+# ✅ Sem default= para não conflitar com session_state e sumir o warning
 moedas = st.multiselect(
     "Escolha até 3 criptos:",
     options=options,
-    default=selected_now[:3] if selected_now else [options[0]],
     max_selections=3,
     key="selected_pairs",
 )
@@ -216,8 +216,14 @@ for moeda in moedas:
 
         k1, k2, k3 = st.columns([1.6, 1, 1])
         k1.metric(f"💰 Preço atual {moeda}", fmt_price(moeda, ultimo, meme_coins), f"{var_pct:.2f}%")
-        k2.metric("📈 Máxima (zoom inicial)", fmt_price(moeda, float(df_full_utc["high"].tail(len(df_plot_view)).max()), meme_coins))
-        k3.metric("📉 Mínima (zoom inicial)", fmt_price(moeda, float(df_full_utc["low"].tail(len(df_plot_view)).min()), meme_coins))
+        k2.metric(
+            "📈 Máxima (zoom inicial)",
+            fmt_price(moeda, float(df_full_utc["high"].tail(len(df_plot_view)).max()), meme_coins),
+        )
+        k3.metric(
+            "📉 Mínima (zoom inicial)",
+            fmt_price(moeda, float(df_full_utc["low"].tail(len(df_plot_view)).min()), meme_coins),
+        )
 
         with tab_chart:
             fig = make_subplots(
@@ -251,16 +257,48 @@ for moeda in moedas:
                 fig.add_hline(y=ultimo, line_dash="dot", opacity=0.5, row=1, col=1)
 
             if show_ma and "MA7" in df_plot.columns:
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA7"], mode="lines", opacity=0.95, name="MA7"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA25"], mode="lines", opacity=0.95, name="MA25"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["MA99"], mode="lines", opacity=0.95, name="MA99"), row=1, col=1)
+                fig.add_trace(
+                    go.Scatter(x=df_plot["timestamp"], y=df_plot["MA7"], mode="lines", opacity=0.95, name="MA7"),
+                    row=1,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(x=df_plot["timestamp"], y=df_plot["MA25"], mode="lines", opacity=0.95, name="MA25"),
+                    row=1,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(x=df_plot["timestamp"], y=df_plot["MA99"], mode="lines", opacity=0.95, name="MA99"),
+                    row=1,
+                    col=1,
+                )
 
             if show_bb and "BB_UP" in df_plot.columns:
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_UP"], mode="lines", opacity=0.5, name="BB Upper"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_MID"], mode="lines", opacity=0.5, name="BB Mid"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_LOW"], mode="lines", opacity=0.5, name="BB Lower"), row=1, col=1)
+                fig.add_trace(
+                    go.Scatter(x=df_plot["timestamp"], y=df_plot["BB_UP"], mode="lines", opacity=0.5, name="BB Upper"),
+                    row=1,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_plot["timestamp"], y=df_plot["BB_MID"], mode="lines", opacity=0.5, name="BB Mid"
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_plot["timestamp"], y=df_plot["BB_LOW"], mode="lines", opacity=0.5, name="BB Lower"
+                    ),
+                    row=1,
+                    col=1,
+                )
 
-            vol_colors = ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_plot["open"], df_plot["close"])] if volume_colored else "rgba(255,255,255,0.22)"
+            vol_colors = (
+                ["#00C896" if c >= o else "#FF4B4B" for o, c in zip(df_plot["open"], df_plot["close"])]
+                if volume_colored
+                else "rgba(255,255,255,0.22)"
+            )
 
             fig.add_trace(
                 go.Bar(
@@ -320,9 +358,11 @@ for moeda in moedas:
 
             html = plotly_autoy_html(fig, height=chart_height, y_padding_ratio=0.035)
             st.components.v1.html(html, height=chart_height + 40, scrolling=False)
-            st.markdown(
-                "<div class='small-note'>Dica: arraste (pan) e use scroll para zoom. O <b>Y acompanha automaticamente</b> o trecho visível no X.</div>",
-                unsafe_allow_html=True,
+
+            # ✅ dica via st.html (não vaza como texto)
+            st.html(
+                "<div class='small-note'>Dica: arraste (pan) e use scroll para zoom. "
+                "O <b>Y acompanha automaticamente</b> o trecho visível no X.</div>"
             )
 
         with tab_rsi:
