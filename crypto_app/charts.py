@@ -1,10 +1,7 @@
 import json
+
 import plotly.graph_objects as go
 from plotly.utils import PlotlyJSONEncoder
-
-
-def add_range_slider(fig):
-    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.06))
 
 
 def apply_crosshair(fig: go.Figure):
@@ -28,9 +25,9 @@ def apply_crosshair(fig: go.Figure):
 def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04) -> str:
     fig_dict = fig.to_plotly_json()
     payload = json.dumps(fig_dict, cls=PlotlyJSONEncoder)
-    pad = float(y_padding_ratio)
 
-    template = f"""<!doctype html>
+    template = """
+<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
@@ -71,15 +68,6 @@ def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04
       return isNaN(ms) ? null : ms;
     }}
 
-    function clampDtick(ymin, ymax) {{
-      const rng = ymax - ymin;
-      if (!isFinite(rng) || rng <= 0) return null;
-      if (rng <= 25000) return 1000;
-      if (rng <= 80000) return 5000;
-      if (rng <= 200000) return 10000;
-      return null;
-    }}
-
     function autoYFromVisibleX(relayout) {{
       if (!ohlc.x || !ohlc.low || !ohlc.high) return;
 
@@ -113,19 +101,13 @@ def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04
 
       if (!isFinite(ymin) || !isFinite(ymax) || ymax <= ymin) return;
 
-      const p = (ymax - ymin) * {pad};
-      const y0 = ymin - p;
-      const y1 = ymax + p;
+      const pad = (ymax - ymin) * {pad};
+      const y0 = ymin - pad;
+      const y1 = ymax + pad;
 
-      const dtick = clampDtick(y0, y1);
-
-      const upd = {{
+      Plotly.relayout(gd, {{
         'yaxis.range': [y0, y1],
-      }};
-
-      upd['yaxis.dtick'] = dtick ? dtick : null;
-
-      Plotly.relayout(gd, upd);
+      }});
     }}
 
     Plotly.newPlot(gd, fig.data, fig.layout, fig.config).then(() => {{
@@ -140,4 +122,4 @@ def plotly_autoy_html(fig: go.Figure, height: int, y_padding_ratio: float = 0.04
 </body>
 </html>
 """
-    return template
+    return template.format(height=height, payload=payload, pad=float(y_padding_ratio))
