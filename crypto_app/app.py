@@ -1,8 +1,3 @@
-diff --git a/app.py b/app.py
-index aecb17dc1c6811300306fab504bb25b1032cb133..bd3f49603f8587c0be34f11e7cc3a7469c7b68e6 100644
---- a/app.py
-+++ b/app.py
-@@ -1,834 +1,359 @@
 -import time
 -import json
 -import math
