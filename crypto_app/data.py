@@ -5,6 +5,24 @@ import requests
 import streamlit as st
 
 from .utils import normalize_ohlcv
+from .data import request_json
+
+
+@st.cache_data(ttl=120)
+def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 1200) -> pd.DataFrame:
+    url = "https://api.binance.com/api/v3/klines"
+    payload = request_json(url, params={"symbol": symbol, "interval": interval, "limit": str(limit)}, attempts=2, base_sleep=0.3)
+
+    df = pd.DataFrame(
+        payload,
+        columns=[
+            "timestamp", "open", "high", "low", "close", "volume",
+            "closeTime", "qav", "numTrades", "tbbav", "tbqav", "ignore",
+        ],
+    )
+    df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms", utc=True)
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+    return normalize_ohlcv(df)
 
 
 def binance_interval(tf: str) -> str:
